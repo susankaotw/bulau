@@ -23,14 +23,48 @@ module.exports = async (req, res) => {
     if (!q) return res.status(400).json({ error: "question is required" });
 
     // MVP：用「問題」欄位做包含搜尋，並以最後編輯時間排序
-    const key = q.length > 16 ? q.slice(0, 16) : q;
-    const query = await notion.databases.query({
+
+const key = q.length > 16 ? q.slice(0, 16) : q;
+let item;
+
+// 1) 先用「標題（Title）」型態查
+let query = await notion.databases.query({
+  database_id: DB_ID,
+  filter: { property: "問題", title: { contains: key } },
+  sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
+});
+item = query.results?.[0];
+
+// 2) 若沒命中，再用 Rich text 型態查（如果你的「問題」其實是 Rich text）
+if (!item) {
+  query = await notion.databases.query({
+    database_id: DB_ID,
+    filter: { property: "問題", rich_text: { contains: key } },
+    sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
+  });
+  item = query.results?.[0];
+}
+
+// 3) 還是沒有？用「主題」Select 當保底（把查詢字做簡單對應）
+if (!item) {
+  const topicGuess = /肩|頸/.test(q) ? "肩頸"
+                    : /腰|下背/.test(q) ? "腰背"
+                    : /膝|腿|下肢/.test(q) ? "下肢"
+                    : /手|肘|上肢/.test(q) ? "上肢"
+                    : null;
+
+  if (topicGuess) {
+    query = await notion.databases.query({
       database_id: DB_ID,
-      filter: { property: "問題", rich_text: { contains: key } },
+      filter: { property: "主題", select: { equals: topicGuess } },
       sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
     });
+    item = query.results?.[0];
+  }
+}
 
-    const item = query.results?.[0];
+
+    
     if (!item) {
       return res.json({
         mode: "查詢",
