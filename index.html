@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>不老助理測試</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    body { font-family: system-ui, -apple-system; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+    label { display:block; margin: 12px 0 6px; font-weight:600; }
+    input, textarea, select { width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; }
+    button { margin-top:14px; padding:10px 16px; border:0; border-radius:10px; cursor:pointer; }
+    pre { background:#f7f7f8; padding:12px; border-radius:8px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h1>不老助理（測試頁）</h1>
+
+  <label>Email</label>
+  <input id="email" value="test@user.com"/>
+
+  <label>模式</label>
+  <select id="mode">
+    <option>查詢</option>
+    <option>創作</option>
+  </select>
+
+  <label>問題</label>
+  <textarea id="q" rows="3">肩頸痠痛</textarea>
+
+  <button id="send">送出測試</button>
+  <pre id="out">（回應會顯示在這裡）</pre>
+
+  <script>
+    document.getElementById('send').onclick = async () => {
+      const body = {
+        email: document.getElementById('email').value,
+        question: document.getElementById('q').value,
+        mode: document.getElementById('mode').value
+      };
+      const resp = await fetch('/api/answer', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json();
+      document.getElementById('out').textContent = JSON.stringify(data, null, 2);
+    };
+  </script>
+</body>
+</html>
