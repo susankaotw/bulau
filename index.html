@@ -5,19 +5,20 @@
   <title>不老助理（查詢版 DEMO）</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
+    :root { color-scheme: light dark; }
     body { font-family: system-ui, -apple-system, "PingFang TC", "Noto Sans TC", sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
     label { display:block; margin: 12px 0 6px; font-weight:600; }
-    input, textarea, select { width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; }
-    button { margin-top:14px; padding:10px 16px; border:0; border-radius:10px; cursor:pointer; }
-    small.muted { color:#6b7280; }
+    input, textarea { width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; }
+    button { margin-top:14px; padding:10px 16px; border:0; border-radius:10px; cursor:pointer; background:#111827; color:#fff; }
+    .muted { color:#6b7280; font-size:12px; }
   </style>
 </head>
 <body>
   <h1>不老助理（查詢版 DEMO）</h1>
-  <small class="muted">目前僅支援「查詢」；內容即時來自 Notion 知識庫。</small>
+  <div class="muted">目前僅支援「查詢」；內容即時來自 Notion 知識庫。</div>
 
   <label>Email</label>
-  <input id="email" value="test@user.com"/>
+  <input id="email" value="test@user.com" autocomplete="email"/>
 
   <label>問題</label>
   <textarea id="q" rows="3" placeholder="例：肩頸痠痛、手舉不起來">肩頸痠痛</textarea>
@@ -25,70 +26,94 @@
   <button id="send">送出查詢</button>
   <div id="result" style="display:none;margin-top:12px"></div>
 
-  <p class="muted" style="margin-top:18px;font-size:12px">
+  <p class="muted" style="margin-top:18px">
     本系統提供一般衛教資訊，<b>不取代醫療診療</b>；若有外傷劇痛、手麻無力、發燒等紅旗症狀，請先就醫評估。
   </p>
 
   <script>
-function esc(s){ return (s??"").toString().replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])); }
+    // 簡單轉義，避免 XSS
+    function esc(s){ return (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])); }
 
-function renderResult(data){
-  const box = document.getElementById('result');
-  box.style.display = 'block';
+    function renderResult(data){
+      const box = document.getElementById('result');
+      box.style.display = 'block';
 
-  // 錯誤或查無資料（或後端回字串提示）
-  if (!data || data.error || typeof data.answer === 'string') {
-    const msg = data?.error || data?.answer || '查不到相符條目，請換個問法（例：肩頸痠痛）。';
-    box.innerHTML = `
-      <div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px">
-        <b style="color:#b91c1c">提示</b><br>
-        <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
-      </div>`;
-    return;
-  }
+      // 任何錯誤或後端以字串提示時
+      if (!data || data.error || typeof data.answer === 'string') {
+        const msg = data?.error || data?.answer || '查不到相符條目，請換個關鍵字（例：肩頸痠痛）。';
+        box.innerHTML = `
+          <div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px">
+            <b style="color:#b91c1c">提示</b><br>
+            <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
+          </div>`;
+        return;
+      }
 
-  // 正常查詢結果
-  const a = data.answer || {};
-  const ver  = data.version ? `版本：${esc(data.version)}` : '';
-  const time = data.updated_at ? `更新：${new Date(data.updated_at).toLocaleString()}` : '';
-  const matched = data.matched ? `（匹配：${esc(data.matched)}）` : '';
+      // 正常查詢結果（answer 應為物件）
+      const a = data.answer || {};
+      const ver  = data.version ? `版本：${esc(data.version)}` : '';
+      const time = data.updated_at ? `更新：${new Date(data.updated_at).toLocaleString()}` : '';
+      const matched = data.matched ? `（匹配：${esc(data.matched)}）` : '';
 
-  const blocks = [];
-  if (a['教材版回覆']) blocks.push(`
-    <div style="margin-top:12px;line-height:1.7">
-      <b>教材版回覆</b><br>${esc(a['教材版回覆'])}
-    </div>`);
-  if (a['對應脊椎分節']) blocks.push(`
-    <div style="margin-top:12px;line-height:1.7">
-      <b>對應脊椎分節</b><br>${esc(a['對應脊椎分節'])}
-    </div>`);
-  if (a['經絡與補充']) blocks.push(`
-    <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
-      <b>經絡與補充</b><br>${esc(a['經絡與補充'])}
-    </div>`);
+      const blocks = [];
+      if (a['教材版回覆']) blocks.push(`
+        <div style="margin-top:12px;line-height:1.7">
+          <b>教材版回覆</b><br>${esc(a['教材版回覆'])}
+        </div>`);
+      if (a['對應脊椎分節']) blocks.push(`
+        <div style="margin-top:12px;line-height:1.7">
+          <b>對應脊椎分節</b><br>${esc(a['對應脊椎分節'])}
+        </div>`);
+      if (a['經絡與補充']) blocks.push(`
+        <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
+          <b>經絡與補充</b><br>${esc(a['經絡與補充'])}
+        </div>`);
 
-  const pro = a['臨床流程建議'] ? `
-    <details style="margin-top:12px">
-      <summary style="cursor:pointer;color:#2563eb">臨床流程建議（專業版）</summary>
-      <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div>
-    </details>` : '';
+      const pro = a['臨床流程建議'] ? `
+        <details style="margin-top:12px">
+          <summary style="cursor:pointer;color:#2563eb">臨床流程建議（專業版）</summary>
+          <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div>
+        </details>` : '';
 
-  box.innerHTML = `
-    <div style="border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#fff">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
-        <div>
-          <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
-          <div style="color:#6b7280;font-size:12px">主題：${esc(a['主題']||'-')} ${matched}</div>
-        </div>
-      </div>
+      box.innerHTML = `
+        <div style="border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#fff">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+            <div>
+              <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
+              <div class="muted">主題：${esc(a['主題']||'-')} ${matched}</div>
+            </div>
+          </div>
 
-      ${blocks.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
-      ${pro}
+          ${blocks.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
+          ${pro}
 
-      <div style="margin-top:12px;color:#6b7280;font-size:12px">${ver}　${time}</div>
-    </div>`;
-}
-</script>
+          <div class="muted" style="margin-top:12px">${ver}　${time}</div>
+        </div>`;
+    }
 
+    document.getElementById('send').onclick = async () => {
+      const body = {
+        email: document.getElementById('email').value,
+        question: document.getElementById('q').value,
+        mode: '查詢'
+      };
+
+      const box = document.getElementById('result');
+      box.style.display = 'block';
+      box.innerHTML = '<div style="padding:8px;color:#6b7280">查詢中…</div>';
+
+      try {
+        const resp = await fetch('/api/answer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        renderResult(data);
+      } catch (e) {
+        renderResult({ error: String(e) });
+      }
+    };
+  </script>
 </body>
 </html>
