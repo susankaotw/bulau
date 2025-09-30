@@ -1,11 +1,11 @@
 // api/answer.js
-// 查詢版（多筆 + 會員Email檢核 + 在地化錯誤訊息）
+// 查詢版（多筆 + 強制會員Email檢核 + 在地化錯誤）
 
 const { Client } = require("@notionhq/client");
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
 const DB_ID = process.env.NOTION_DB_ID;                // QA 主資料庫
-const MEMBER_DB = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（可選）
+const MEMBER_DB = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（必填）
 const JOIN_URL = process.env.JOIN_URL || "";
 
 // ---------- 工具 ----------
@@ -37,16 +37,21 @@ function pageToItem(page){
   };
 }
 
-// ---------- 會員檢核 ----------
+// ---------- 會員檢核（硬性） ----------
 async function checkMember(email){
-  if (!MEMBER_DB) return { ok: true, level: "" }; // 未設定名單DB時預設放行
-  // Email 型別
+  if (!MEMBER_DB) {
+    // 沒設會員DB就直接擋，避免誤放行
+    return { ok:false, reason:"member_db_missing" };
+  }
+
+  // 先以 Email 型別查
   let r = await notion.databases.query({
     database_id: MEMBER_DB,
     filter: { property: "Email", email: { equals: email } },
     page_size: 1
   });
-  // 後備：若誤建為 Rich text
+
+  // 後備：若你的 Email 欄誤建成 Rich text
   if (!r.results?.length) {
     r = await notion.databases.query({
       database_id: MEMBER_DB,
@@ -60,7 +65,7 @@ async function checkMember(email){
   const statusName = p["狀態"]?.status?.name || p["狀態"]?.select?.name || "";
   const statusOK = !statusName || statusName === "啟用";
 
-  // 到期（空白＝不限期）
+  // 到期檢查（空白視為不限期）
   let expired = false;
   const d = p["有效期限"]?.date;
   if (d) {
@@ -85,7 +90,7 @@ module.exports = async (req, res) => {
 
     const { email = "", question, 問題 } = req.body || {};
 
-    // Email 檢核（依你規則）
+    // Email 檢核（空白 / 格式錯）
     const emailStr = String(email || "").trim();
     if (!emailStr) {
       return res.status(400).json({ error: "請輸入email" });
@@ -94,18 +99,19 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "email檢錯誤" });
     }
 
-    // 會員資格
+    // 會員資格（硬性）
     const gate = await checkMember(emailStr);
     if (!gate.ok) {
       const msg =
-        gate.reason === "not_found" ? "此 Email 不在會員名單中。"
-      : gate.reason === "disabled" ? "帳號已停用，如需啟用請聯繫我們。"
-      : gate.reason === "expired"  ? "您的會員已到期，請續約後再使用。"
+        gate.reason === "member_db_missing" ? "系統尚未設定會員名單，請聯絡管理員。"
+      : gate.reason === "not_found"        ? "此 Email 不在會員名單中。"
+      : gate.reason === "disabled"         ? "帳號已停用，如需啟用請聯繫我們。"
+      : gate.reason === "expired"          ? "您的會員已到期，請續約後再使用。"
       : "目前無法驗證您的資格。";
       return res.status(403).json({ error: JOIN_URL ? `${msg} 申請/續約：${JOIN_URL}` : msg });
     }
 
-    // 問題檢核（依你規則）
+    // 問題檢核
     const q = String(question ?? 問題 ?? "").trim();
     if (!q) return res.status(400).json({ error: "請輸入關鍵字" });
 
