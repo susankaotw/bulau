@@ -64,30 +64,30 @@
       const matched = data.matched ? `（匹配：${esc(data.matched)}）` : '';
 
       const rows = [];
-      if (a['衛教版回覆']) rows.push(`
+      if (a['教材版回覆']) rows.push(`
         <div style="margin-top:12px;line-height:1.7">
-          <b>衛教重點</b>（教材版回覆）<br>${esc(a['衛教版回覆'])}
+          <b>教材版回覆</b>（教材版回覆）<br>${esc(a['衛教版回覆'])}
         </div>`);
-      if (a['建議動作']) rows.push(`
+      if (a['對應脊椎分節']) rows.push(`
         <div style="margin-top:12px;line-height:1.7">
-          <b>建議動作 / 分節</b>（對應脊椎分節）<br>${esc(a['建議動作'])}
+          <b>對應脊椎分節 / 分節</b>（對應脊椎分節）<br>${esc(a['對應脊椎分節'])}
         </div>`);
-      if (a['禁忌與注意']) rows.push(`
+      if (a['經絡與補充']) rows.push(`
         <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
-          <b>禁忌與注意</b>（經絡與補充）<br>${esc(a['禁忌與注意'])}
+          <b>經絡與補充</b>（經絡與補充）<br>${esc(a['經絡與補充'])}
         </div>`);
 
-      const pro = a['專業版回覆'] ? `
+      const pro = a['臨床流程建議'] ? `
         <details>
-          <summary>顯示專業版（臨床流程建議）</summary>
-          <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['專業版回覆'])}</div>
+          <summary>臨床流程建議（臨床流程建議）</summary>
+          <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div>
         </details>` : '';
 
       // 一鍵複製：衛教 + 建議動作
-      const toCopy = (a['衛教版回覆']||'') + (a['建議動作']?('\n建議：'+a['建議動作']):'');
+      const toCopy = (a['教材版回覆']||'') + (a['對應脊椎分節']?('\n脊椎：'+a['對應脊椎分節']):'');
       const copyBtn = `
         <button onclick="navigator.clipboard.writeText(${JSON.stringify(toCopy)}); this.textContent='已複製'; setTimeout(()=>this.textContent='複製衛教',1200);">
-          複製衛教
+          教材版回覆
         </button>`;
 
       box.innerHTML = `
