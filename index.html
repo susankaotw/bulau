@@ -2,49 +2,141 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8" />
-  <title>不老助理測試</title>
+  <title>不老平衡骨架中心｜AI 助理 DEMO</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    body { font-family: system-ui, -apple-system; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+    :root { --border:#e5e7eb; --muted:#6b7280; }
+    body { font-family: system-ui,-apple-system,"Noto Sans TC","Segoe UI",Arial; max-width: 720px; margin: 24px auto; padding: 0 16px; background:#fafafa; }
+    h1 { margin:0 0 8px; }
     label { display:block; margin: 12px 0 6px; font-weight:600; }
-    input, textarea, select { width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; }
-    button { margin-top:14px; padding:10px 16px; border:0; border-radius:10px; cursor:pointer; }
-    pre { background:#f7f7f8; padding:12px; border-radius:8px; overflow:auto; }
+    input, textarea, select { width:100%; padding:10px; border:1px solid #ddd; border-radius:10px; background:#fff; }
+    button { margin-top:14px; padding:10px 16px; border:1px solid var(--border); background:#fff; border-radius:12px; cursor:pointer; }
+    .chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px }
+    .chip { padding:6px 10px; border:1px solid var(--border); border-radius:999px; background:#fff; font-size:12px; cursor:pointer }
+    #result { margin-top:14px; }
+    .card { border:1px solid var(--border); border-radius:16px; padding:16px; background:#fff }
+    .muted { color:var(--muted); font-size:12px }
+    details { margin-top:12px }
+    summary { cursor:pointer; color:#2563eb }
   </style>
 </head>
 <body>
-  <h1>不老助理（測試頁）</h1>
+  <h1>不老助理（查詢 DEMO）</h1>
+  <div class="muted">目前僅提供「查詢」功能；內容即時讀取 Notion 知識庫。</div>
 
   <label>Email</label>
   <input id="email" value="test@user.com"/>
 
-  <label>模式</label>
-  <select id="mode">
-    <option>查詢</option>
-    <option>創作</option>
-  </select>
-
   <label>問題</label>
-  <textarea id="q" rows="3">肩頸痠痛</textarea>
+  <textarea id="q" rows="3" placeholder="例如：肩頸痠痛、手舉不起來"></textarea>
+  <div class="chips">
+    <span class="chip" data-q="肩頸痠痛">肩頸痠痛</span>
+    <span class="chip" data-q="手舉不起來">手舉不起來</span>
+  </div>
 
-  <button id="send">送出測試</button>
-  <pre id="out">（回應會顯示在這裡）</pre>
+  <button id="send">送出查詢</button>
+  <div id="result" style="display:none"></div>
 
   <script>
-    document.getElementById('send').onclick = async () => {
+    // 小工具：跳脫 HTML
+    function esc(s){ return (s??"").toString().replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])); }
+
+    // 依 API 回應渲染結果
+    function renderResult(data){
+      const box = document.getElementById('result');
+      box.style.display = 'block';
+
+      // 錯誤或找不到（或後端回文字提示）
+      if (!data || data.error || typeof data.answer === 'string') {
+        const msg = data?.error || data?.answer || '查不到相符條目，請換個問法（例：肩頸痠痛、手舉不起來）。';
+        box.innerHTML = `
+          <div class="card" style="border-color:#fecaca;background:#fff1f2">
+            <b style="color:#b91c1c">提示</b><br>
+            <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
+          </div>`;
+        return;
+      }
+
+      // 查詢結果（answer 是物件；鍵名已由後端映射到舊版）
+      const a = data.answer || {};
+      const ver  = data.version ? `版本：${esc(data.version)}` : '';
+      const time = data.updated_at ? `更新：${new Date(data.updated_at).toLocaleString()}` : '';
+      const matched = data.matched ? `（匹配：${esc(data.matched)}）` : '';
+
+      const rows = [];
+      if (a['衛教版回覆']) rows.push(`
+        <div style="margin-top:12px;line-height:1.7">
+          <b>衛教重點</b>（教材版回覆）<br>${esc(a['衛教版回覆'])}
+        </div>`);
+      if (a['建議動作']) rows.push(`
+        <div style="margin-top:12px;line-height:1.7">
+          <b>建議動作 / 分節</b>（對應脊椎分節）<br>${esc(a['建議動作'])}
+        </div>`);
+      if (a['禁忌與注意']) rows.push(`
+        <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
+          <b>禁忌與注意</b>（經絡與補充）<br>${esc(a['禁忌與注意'])}
+        </div>`);
+
+      const pro = a['專業版回覆'] ? `
+        <details>
+          <summary>顯示專業版（臨床流程建議）</summary>
+          <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['專業版回覆'])}</div>
+        </details>` : '';
+
+      // 一鍵複製：衛教 + 建議動作
+      const toCopy = (a['衛教版回覆']||'') + (a['建議動作']?('\n建議：'+a['建議動作']):'');
+      const copyBtn = `
+        <button onclick="navigator.clipboard.writeText(${JSON.stringify(toCopy)}); this.textContent='已複製'; setTimeout(()=>this.textContent='複製衛教',1200);">
+          複製衛教
+        </button>`;
+
+      box.innerHTML = `
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+            <div>
+              <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
+              <div class="muted">主題：${esc(a['主題']||'-')} ${matched}</div>
+            </div>
+            ${copyBtn}
+          </div>
+
+          ${rows.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
+          ${pro}
+
+          <div class="muted" style="margin-top:12px">${ver}　${time}</div>
+        </div>`;
+    }
+
+    // 送出查詢
+    async function doQuery(){
       const body = {
         email: document.getElementById('email').value,
         question: document.getElementById('q').value,
-        mode: document.getElementById('mode').value
+        mode: '查詢'
       };
-      const resp = await fetch('/api/answer', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(body)
-      });
-      const data = await resp.json();
-      document.getElementById('out').textContent = JSON.stringify(data, null, 2);
-    };
+      const box = document.getElementById('result');
+      box.style.display = 'block';
+      box.innerHTML = '<div class="muted">查詢中…</div>';
+      try {
+        const resp = await fetch('/api/answer', {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        renderResult(data);
+      } catch (e) {
+        renderResult({ error: String(e) });
+      }
+    }
+
+    document.getElementById('send').onclick = doQuery;
+    document.querySelectorAll('.chip').forEach(el=>{
+      el.onclick = ()=>{ document.getElementById('q').value = el.dataset.q; doQuery(); };
+    });
+    document.getElementById('q').addEventListener('keydown', (e)=>{
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doQuery();
+    });
   </script>
 </body>
 </html>
