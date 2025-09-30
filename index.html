@@ -11,20 +11,22 @@
     input, textarea { width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; }
     button { margin-top:14px; padding:10px 16px; border:0; border-radius:10px; cursor:pointer; background:#111827; color:#fff; }
     .muted { color:#6b7280; font-size:12px; }
+    .error { color:#b91c1c; font-size:12px; margin-top:6px; display:none; }
     .card { border:1px solid #e5e7eb; border-radius:16px; padding:16px; background:#fff; margin-top:12px; }
   </style>
 </head>
 <body>
   <h1>不老助理（查詢版 DEMO）</h1>
-  <div class="muted">目前僅支援「查詢」；內容即時來自 Notion 知識庫。</div>
+  <div class="muted">僅限會員使用；內容即時來自 Notion 知識庫。</div>
 
   <label>Email</label>
-  <input id="email" value="test@user.com" autocomplete="email"/>
+  <input id="email" value="" autocomplete="email" placeholder="you@example.com"/>
+  <div id="emailErr" class="error">請輸入有效的 Email</div>
 
   <label>問題</label>
-  <textarea id="q" rows="3" placeholder="例：肩頸痠痛、手舉不起來">肩頸痠痛</textarea>
+  <textarea id="q" rows="3" placeholder="例：肩頸痠痛、手舉不起來"></textarea>
 
-  <button id="send">送出查詢</button>
+  <button id="send" disabled>送出查詢</button>
   <div id="result" style="display:none;margin-top:12px"></div>
 
   <p class="muted" style="margin-top:18px">
@@ -32,55 +34,50 @@
   </p>
 
   <script>
-    const esc = (s)=> (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m]));
+    const esc = (s)=> (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;","&gt;":"&gt;","\"":"&quot;","'":"&#39;" }[m]));
+    const isEmail = (s)=> /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||""));
+
+    // Email 即時檢核
+    const emailInput = document.getElementById('email');
+    const emailErr = document.getElementById('emailErr');
+    const sendBtn = document.getElementById('send');
+
+    function validateEmail(){
+      const ok = isEmail(emailInput.value);
+      emailErr.style.display = ok ? 'none' : 'block';
+      sendBtn.disabled = !ok;
+      emailInput.style.borderColor = ok ? '#ddd' : '#f87171';
+    }
+    emailInput.addEventListener('input', validateEmail);
+    emailInput.addEventListener('blur', validateEmail);
 
     function cardHTML(a){
       const ver  = a.version ? `版本：${esc(a.version)}` : '';
       const time = a.updated_at ? `更新：${new Date(a.updated_at).toLocaleString()}` : '';
       const blocks = [];
-      if (a['教材版回覆']) blocks.push(`
-        <div style="margin-top:12px;line-height:1.7">
-          <b>教材版回覆</b><br>${esc(a['教材版回覆'])}
-        </div>`);
-      if (a['對應脊椎分節']) blocks.push(`
-        <div style="margin-top:12px;line-height:1.7">
-          <b>對應脊椎分節</b><br>${esc(a['對應脊椎分節'])}
-        </div>`);
-      if (a['經絡與補充']) blocks.push(`
-        <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
-          <b>經絡與補充</b><br>${esc(a['經絡與補充'])}
-        </div>`);
-      const pro = a['臨床流程建議'] ? `
-        <details style="margin-top:12px">
-          <summary style="cursor:pointer;color:#2563eb">臨床流程建議（專業版）</summary>
-          <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div>
-        </details>` : '';
-      return `
-        <div class="card">
-          <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
-          <div class="muted">主題：${esc(a['主題']||'-')}</div>
-          ${blocks.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
-          ${pro}
-          <div class="muted" style="margin-top:12px">${ver}　${time}</div>
-        </div>`;
+      if (a['教材版回覆']) blocks.push(`<div style="margin-top:12px;line-height:1.7"><b>教材版回覆</b><br>${esc(a['教材版回覆'])}</div>`);
+      if (a['對應脊椎分節']) blocks.push(`<div style="margin-top:12px;line-height:1.7"><b>對應脊椎分節</b><br>${esc(a['對應脊椎分節'])}</div>`);
+      if (a['經絡與補充']) blocks.push(`<div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px"><b>經絡與補充</b><br>${esc(a['經絡與補充'])}</div>`);
+      const pro = a['臨床流程建議'] ? `<details style="margin-top:12px"><summary style="cursor:pointer;color:#2563eb">臨床流程建議（專業版）</summary><div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div></details>` : '';
+      return `<div class="card">
+        <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
+        <div class="muted">主題：${esc(a['主題']||'-')}</div>
+        ${blocks.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
+        ${pro}
+        <div class="muted" style="margin-top:12px">${ver}　${time}</div>
+      </div>`;
     }
 
     function renderResult(data){
       const box = document.getElementById('result');
       box.style.display = 'block';
 
-      // 錯誤或查無資料（或後端回字串提示）
       if (!data || data.error || typeof data.answer === 'string') {
         const msg = data?.error || data?.answer || '查不到相符條目，請換個關鍵字（例：肩頸痠痛）。';
-        box.innerHTML = `
-          <div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px">
-            <b style="color:#b91c1c">提示</b><br>
-            <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
-          </div>`;
+        box.innerHTML = `<div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px"><b style="color:#b91c1c">提示</b><br><div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div></div>`;
         return;
       }
 
-      // 有多筆 items 就逐一顯示；否則顯示單筆 answer（相容舊版）
       const items = Array.isArray(data.items) && data.items.length ? data.items : null;
       if (items) {
         const header = `<div class="muted">找到 ${items.length} 筆結果（匹配：${esc(data.matched || '')}）</div>`;
@@ -91,14 +88,19 @@
     }
 
     document.getElementById('send').onclick = async () => {
+      validateEmail();
+      if (sendBtn.disabled) return;
+
       const body = {
-        email: document.getElementById('email').value,
+        email: emailInput.value,
         question: document.getElementById('q').value,
         mode: '查詢'
       };
+
       const box = document.getElementById('result');
       box.style.display = 'block';
       box.innerHTML = '<div style="padding:8px;color:#6b7280">查詢中…</div>';
+
       try {
         const resp = await fetch('/api/answer', {
           method: 'POST',
