@@ -21,10 +21,11 @@
 
   <label>Email</label>
   <input id="email" value="" autocomplete="email" placeholder="you@example.com"/>
-  <div id="emailErr" class="error">請輸入有效的 Email</div>
+  <div id="emailErr" class="error"></div>
 
   <label>問題</label>
   <textarea id="q" rows="3" placeholder="例：肩頸痠痛、手舉不起來"></textarea>
+  <div id="qErr" class="error"></div>
 
   <button id="send" disabled>送出查詢</button>
   <div id="result" style="display:none;margin-top:12px"></div>
@@ -34,22 +35,41 @@
   </p>
 
   <script>
-    const esc = (s)=> (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;","&gt;":"&gt;","\"":"&quot;","'":"&#39;" }[m]));
+    const esc = (s)=> (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m]));
     const isEmail = (s)=> /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||""));
 
-    // Email 即時檢核
     const emailInput = document.getElementById('email');
     const emailErr = document.getElementById('emailErr');
+    const qInput = document.getElementById('q');
+    const qErr = document.getElementById('qErr');
     const sendBtn = document.getElementById('send');
 
     function validateEmail(){
-      const ok = isEmail(emailInput.value);
+      const s = emailInput.value.trim();
+      let ok = false, msg = '';
+      if (!s) msg = '請輸入email';
+      else if (!isEmail(s)) msg = 'email檢錯誤';
+      else ok = true;
+
+      emailErr.textContent = msg;
       emailErr.style.display = ok ? 'none' : 'block';
-      sendBtn.disabled = !ok;
       emailInput.style.borderColor = ok ? '#ddd' : '#f87171';
+      sendBtn.disabled = !ok || !validateQuestion(true);
+      return ok;
+    }
+    function validateQuestion(silent=false){
+      const s = qInput.value.trim();
+      const ok = !!s;
+      if (!silent) {
+        qErr.textContent = ok ? '' : '請輸入關鍵字';
+        qErr.style.display = ok ? 'none' : 'block';
+        qInput.style.borderColor = ok ? '#ddd' : '#f87171';
+      }
+      return ok;
     }
     emailInput.addEventListener('input', validateEmail);
     emailInput.addEventListener('blur', validateEmail);
+    qInput.addEventListener('input', ()=>{ validateQuestion(); sendBtn.disabled = !validateEmail() || !validateQuestion(true); });
 
     function cardHTML(a){
       const ver  = a.version ? `版本：${esc(a.version)}` : '';
@@ -88,14 +108,11 @@
     }
 
     document.getElementById('send').onclick = async () => {
-      validateEmail();
-      if (sendBtn.disabled) return;
+      const okE = validateEmail();
+      const okQ = validateQuestion();
+      if (!okE || !okQ) return;
 
-      const body = {
-        email: emailInput.value,
-        question: document.getElementById('q').value,
-        mode: '查詢'
-      };
+      const body = { email: emailInput.value.trim(), question: qInput.value.trim(), mode: '查詢' };
 
       const box = document.getElementById('result');
       box.style.display = 'block';
