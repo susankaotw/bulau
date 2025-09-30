@@ -109,7 +109,7 @@ module.exports = async (req, res) => {
     }
 
     const q = String(question ?? 問題 ?? "").trim();
-    if (!q) return res.status(400).json({ error: "question is required" });
+    if (!q) return res.status(400).json({ error: "請輸入關鍵字" });
 
     const key = q.length > 16 ? q.slice(0, 16) : q;
 
