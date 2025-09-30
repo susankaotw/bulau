@@ -72,6 +72,10 @@
         <div style="margin-top:12px;line-height:1.7">
           <b>對應脊椎分節 / 分節</b>（對應脊椎分節）<br>${esc(a['對應脊椎分節'])}
         </div>`);
+      if (a['臨床流程建議']) rows.push(`
+        <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
+          <b>臨床流程建議</b>（臨床流程建議）<br>${esc(a['臨床流程建議'])}
+        </div>`);
       if (a['經絡與補充']) rows.push(`
         <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
           <b>經絡與補充</b>（經絡與補充）<br>${esc(a['經絡與補充'])}
