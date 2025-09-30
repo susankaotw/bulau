@@ -1,14 +1,17 @@
 // api/answer.js
-// 不老平衡骨架中心｜查詢版（支援多筆）
+// 查詢版（支援多筆 + 會員Email檢核）
 
 const { Client } = require("@notionhq/client");
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
-const DB_ID = process.env.NOTION_DB_ID;
 
-const rtText = (prop) =>
-  (prop?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
-const titleText = (prop) =>
-  (prop?.title || []).map(t => t?.plain_text || "").join("").trim();
+const DB_ID = process.env.NOTION_DB_ID;                // QA 主資料庫
+const MEMBER_DB = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（必填以啟用檢核）
+const JOIN_URL = process.env.JOIN_URL || "";
+
+// ---------- 小工具 ----------
+const rtText = (prop) => (prop?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
+const titleText = (prop) => (prop?.title || []).map(t => t?.plain_text || "").join("").trim();
+const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||""));
 
 function guessTopic(q) {
   if (!q) return null;
@@ -19,7 +22,7 @@ function guessTopic(q) {
   return null;
 }
 
-function pageToItem(page) {
+function pageToItem(page){
   const p = page.properties || {};
   return {
     主題: p["主題"]?.select?.name || "",
@@ -34,6 +37,52 @@ function pageToItem(page) {
   };
 }
 
+// ---------- 會員檢核 ----------
+async function checkMember(email){
+  if (!MEMBER_DB) {
+    // 未設定會員DB時，為避免誤鎖全部，預設放行；要強制一定檢核可改成 return { ok:false, reason:"未設定會員DB" }
+    return { ok: true, level: "" };
+  }
+  // 以 Email 型別查
+  let r = await notion.databases.query({
+    database_id: MEMBER_DB,
+    filter: { property: "Email", email: { equals: email } },
+    page_size: 1
+  });
+  // 後備：Email 欄若被建成 Rich text
+  if (!r.results?.length) {
+    r = await notion.databases.query({
+      database_id: MEMBER_DB,
+      filter: { property: "Email", rich_text: { equals: email } },
+      page_size: 1
+    });
+  }
+  if (!r.results?.length) return { ok: false, reason: "not_found" };
+
+  const p = r.results[0].properties || {};
+  const statusName =
+    (p["狀態"]?.status?.name) ||
+    (p["狀態"]?.select?.name) || "";
+  const statusOK = !statusName || statusName === "啟用";
+
+  // 到期檢查（空白視為不限期）
+  let expired = false;
+  const d = p["有效期限"]?.date;
+  if (d) {
+    const end = d.end || d.start;
+    if (end) expired = new Date(end).getTime() < Date.now();
+  }
+
+  if (!statusOK)   return { ok:false, reason:"disabled" };
+  if (expired)     return { ok:false, reason:"expired" };
+
+  const level =
+    p["等級"]?.select?.name ||
+    (p["等級"]?.multi_select || []).map(x=>x.name).join(",") || "";
+  return { ok:true, level };
+}
+
+// ---------- 主處理 ----------
 module.exports = async (req, res) => {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
@@ -42,12 +91,29 @@ module.exports = async (req, res) => {
     }
 
     const { email = "", question, 問題 } = req.body || {};
+    if (!isEmail(email)) {
+      return res.status(400).json({ error: "請輸入有效 Email 才能使用。" });
+    }
+
+    // 會員檢核
+    const gate = await checkMember(email);
+    if (!gate.ok) {
+      const msg =
+        gate.reason === "not_found" ? "此 Email 不在會員名單中。"
+      : gate.reason === "disabled" ? "帳號已停用，如需啟用請聯繫我們。"
+      : gate.reason === "expired"  ? "您的會員已到期，請續約後再使用。"
+      : "目前無法驗證您的資格。";
+      return res.status(403).json({
+        error: JOIN_URL ? `${msg} 申請/續約：${JOIN_URL}` : msg
+      });
+    }
+
     const q = String(question ?? 問題 ?? "").trim();
     if (!q) return res.status(400).json({ error: "question is required" });
 
     const key = q.length > 16 ? q.slice(0, 16) : q;
 
-    // 依序嘗試：Title → Rich text → 主題保底；取第一個有結果的集合
+    // 依序嘗試：Title → Rich → 主題保底
     let results = [];
     let resp = await notion.databases.query({
       database_id: DB_ID,
@@ -89,20 +155,19 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 取前 N 筆（你可調整）
-    const N = 5;
+    const N = 5; // 顯示前 N 筆
     const items = results.slice(0, N).map(pageToItem);
 
-    // 相容舊前端：帶第一筆在 answer/version/updated_at
     return res.json({
       mode: "查詢",
       email,
       matched: key,
       count: items.length,
       items,
-      answer: items[0],                 // 供舊版使用
-      version: items[0].version,        // 供舊版使用
-      updated_at: items[0].updated_at   // 供舊版使用
+      // 相容：仍帶第一筆到舊欄位
+      answer: items[0],
+      version: items[0].version,
+      updated_at: items[0].updated_at
     });
   } catch (err) {
     return res.status(500).json({ error: String(err?.message || err) });
