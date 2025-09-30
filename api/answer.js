@@ -1,14 +1,14 @@
 // api/answer.js
-// 查詢版（支援多筆 + 會員Email檢核）
+// 查詢版（多筆 + 會員Email檢核 + 在地化錯誤訊息）
 
 const { Client } = require("@notionhq/client");
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
 const DB_ID = process.env.NOTION_DB_ID;                // QA 主資料庫
-const MEMBER_DB = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（必填以啟用檢核）
+const MEMBER_DB = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（可選）
 const JOIN_URL = process.env.JOIN_URL || "";
 
-// ---------- 小工具 ----------
+// ---------- 工具 ----------
 const rtText = (prop) => (prop?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
 const titleText = (prop) => (prop?.title || []).map(t => t?.plain_text || "").join("").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||""));
@@ -39,17 +39,14 @@ function pageToItem(page){
 
 // ---------- 會員檢核 ----------
 async function checkMember(email){
-  if (!MEMBER_DB) {
-    // 未設定會員DB時，為避免誤鎖全部，預設放行；要強制一定檢核可改成 return { ok:false, reason:"未設定會員DB" }
-    return { ok: true, level: "" };
-  }
-  // 以 Email 型別查
+  if (!MEMBER_DB) return { ok: true, level: "" }; // 未設定名單DB時預設放行
+  // Email 型別
   let r = await notion.databases.query({
     database_id: MEMBER_DB,
     filter: { property: "Email", email: { equals: email } },
     page_size: 1
   });
-  // 後備：Email 欄若被建成 Rich text
+  // 後備：若誤建為 Rich text
   if (!r.results?.length) {
     r = await notion.databases.query({
       database_id: MEMBER_DB,
@@ -60,12 +57,10 @@ async function checkMember(email){
   if (!r.results?.length) return { ok: false, reason: "not_found" };
 
   const p = r.results[0].properties || {};
-  const statusName =
-    (p["狀態"]?.status?.name) ||
-    (p["狀態"]?.select?.name) || "";
+  const statusName = p["狀態"]?.status?.name || p["狀態"]?.select?.name || "";
   const statusOK = !statusName || statusName === "啟用";
 
-  // 到期檢查（空白視為不限期）
+  // 到期（空白＝不限期）
   let expired = false;
   const d = p["有效期限"]?.date;
   if (d) {
@@ -76,9 +71,7 @@ async function checkMember(email){
   if (!statusOK)   return { ok:false, reason:"disabled" };
   if (expired)     return { ok:false, reason:"expired" };
 
-  const level =
-    p["等級"]?.select?.name ||
-    (p["等級"]?.multi_select || []).map(x=>x.name).join(",") || "";
+  const level = p["等級"]?.select?.name || (p["等級"]?.multi_select || []).map(x=>x.name).join(",") || "";
   return { ok:true, level };
 }
 
@@ -91,29 +84,34 @@ module.exports = async (req, res) => {
     }
 
     const { email = "", question, 問題 } = req.body || {};
-    if (!isEmail(email)) {
-      return res.status(400).json({ error: "請輸入有效 Email 才能使用。" });
+
+    // Email 檢核（依你規則）
+    const emailStr = String(email || "").trim();
+    if (!emailStr) {
+      return res.status(400).json({ error: "請輸入email" });
+    }
+    if (!isEmail(emailStr)) {
+      return res.status(400).json({ error: "email檢錯誤" });
     }
 
-    // 會員檢核
-    const gate = await checkMember(email);
+    // 會員資格
+    const gate = await checkMember(emailStr);
     if (!gate.ok) {
       const msg =
         gate.reason === "not_found" ? "此 Email 不在會員名單中。"
       : gate.reason === "disabled" ? "帳號已停用，如需啟用請聯繫我們。"
       : gate.reason === "expired"  ? "您的會員已到期，請續約後再使用。"
       : "目前無法驗證您的資格。";
-      return res.status(403).json({
-        error: JOIN_URL ? `${msg} 申請/續約：${JOIN_URL}` : msg
-      });
+      return res.status(403).json({ error: JOIN_URL ? `${msg} 申請/續約：${JOIN_URL}` : msg });
     }
 
+    // 問題檢核（依你規則）
     const q = String(question ?? 問題 ?? "").trim();
-    if (!q) return res.status(400).json({ error: "question is required" });
+    if (!q) return res.status(400).json({ error: "請輸入關鍵字" });
 
     const key = q.length > 16 ? q.slice(0, 16) : q;
 
-    // 依序嘗試：Title → Rich → 主題保底
+    // 查詢：Title → Rich text → 主題保底
     let results = [];
     let resp = await notion.databases.query({
       database_id: DB_ID,
@@ -149,22 +147,21 @@ module.exports = async (req, res) => {
     if (!results?.length) {
       return res.json({
         mode: "查詢",
-        email,
+        email: emailStr,
         answer: "查不到相符條目，請改用其他關鍵字（例：肩頸痠痛、手舉不起來）。",
         matched: null, version: null, updated_at: null, count: 0, items: []
       });
     }
 
-    const N = 5; // 顯示前 N 筆
+    const N = 5;
     const items = results.slice(0, N).map(pageToItem);
 
     return res.json({
       mode: "查詢",
-      email,
+      email: emailStr,
       matched: key,
       count: items.length,
       items,
-      // 相容：仍帶第一筆到舊欄位
       answer: items[0],
       version: items[0].version,
       updated_at: items[0].updated_at
