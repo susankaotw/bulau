@@ -1,17 +1,18 @@
 // api/answer.js
-// 查詢版（多筆 + 強制會員Email檢核 + 在地化錯誤）
+// 查詢版（多筆 + 強制會員Email檢核 + 自動偵測會員DB欄位 + 在地化錯誤）
 
 const { Client } = require("@notionhq/client");
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
-const DB_ID = process.env.NOTION_DB_ID;                // QA 主資料庫
-const MEMBER_DB = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（必填）
-const JOIN_URL = process.env.JOIN_URL || "";
+const QA_DB_ID     = process.env.NOTION_DB_ID;            // QA 主資料庫（必填）
+const MEMBER_DB_ID = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（必填）
+const JOIN_URL     = process.env.JOIN_URL || "";
 
-// ---------- 工具 ----------
+// ====== 共用工具 ======
 const rtText = (prop) => (prop?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
 const titleText = (prop) => (prop?.title || []).map(t => t?.plain_text || "").join("").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||""));
+const toLower = (s) => String(s||"").trim().toLowerCase();
 
 function guessTopic(q) {
   if (!q) return null;
@@ -37,54 +38,132 @@ function pageToItem(page){
   };
 }
 
-// ---------- 會員檢核（硬性） ----------
+// ====== 會員DB欄位偵測（快取） ======
+let memberFieldCache = null;
+/**
+ * 自動偵測會員名單DB的關鍵欄位
+ * 回傳 { email: {name, type}, statusName, expiryName, levelName }
+ */
+async function detectMemberFields() {
+  if (memberFieldCache) return memberFieldCache;
+  const meta = await notion.databases.retrieve({ database_id: MEMBER_DB_ID });
+  const props = meta.properties || {};
+
+  // 找 Email 欄位（優先 type=email；或名稱包含 email/mail/信箱）
+  let emailField = null;
+  for (const [name, def] of Object.entries(props)) {
+    const t = def?.type;
+    const lname = name.toLowerCase();
+    if (t === "email") { emailField = { name, type: "email" }; break; }
+    if (!emailField && /email|mail|信箱/i.test(name)) {
+      // 允許 Rich text 當 Email 欄
+      if (t === "rich_text" || t === "title" || t === "formula" /*保底*/ ) {
+        emailField = { name, type: t };
+      }
+    }
+  }
+
+  // 狀態（status or select, 名稱含 狀態/Status）
+  let statusName = null;
+  for (const [name, def] of Object.entries(props)) {
+    const t = def?.type;
+    if ((t === "status" || t === "select") && /狀態|status/i.test(name)) { statusName = name; break; }
+  }
+
+  // 有效期限（date，名稱含 有效/期限/到期/expiry）
+  let expiryName = null;
+  for (const [name, def] of Object.entries(props)) {
+    if (def?.type === "date" && /(有效|期限|到期|expire|expiry)/i.test(name)) { expiryName = name; break; }
+  }
+
+  // 等級（select/multi_select，名稱含 等級/級別/level）
+  let levelName = null;
+  for (const [name, def] of Object.entries(props)) {
+    const t = def?.type;
+    if ((t === "select" || t === "multi_select") && /(等級|級別|level)/i.test(name)) { levelName = name; break; }
+  }
+
+  memberFieldCache = { email: emailField, statusName, expiryName, levelName };
+  return memberFieldCache;
+}
+
+// ====== 會員檢核（硬性） ======
 async function checkMember(email){
-  if (!MEMBER_DB) {
-    // 沒設會員DB就直接擋，避免誤放行
-    return { ok:false, reason:"member_db_missing" };
-  }
+  if (!MEMBER_DB_ID) return { ok:false, reason:"member_db_missing" };
 
-  // 先以 Email 型別查
-  let r = await notion.databases.query({
-    database_id: MEMBER_DB,
-    filter: { property: "Email", email: { equals: email } },
-    page_size: 1
-  });
+  const fields = await detectMemberFields();
+  if (!fields.email) return { ok:false, reason:"email_field_missing" };
 
-  // 後備：若你的 Email 欄誤建成 Rich text
-  if (!r.results?.length) {
+  const emailField = fields.email;
+
+  // 先用最準的 filter 查
+  let r;
+  if (emailField.type === "email") {
     r = await notion.databases.query({
-      database_id: MEMBER_DB,
-      filter: { property: "Email", rich_text: { equals: email } },
-      page_size: 1
+      database_id: MEMBER_DB_ID,
+      filter: { property: emailField.name, email: { equals: email } },
+      page_size: 3
     });
-  }
-  if (!r.results?.length) return { ok: false, reason: "not_found" };
-
-  const p = r.results[0].properties || {};
-  const statusName = p["狀態"]?.status?.name || p["狀態"]?.select?.name || "";
-  const statusOK = !statusName || statusName === "啟用";
-
-  // 到期檢查（空白視為不限期）
-  let expired = false;
-  const d = p["有效期限"]?.date;
-  if (d) {
-    const end = d.end || d.start;
-    if (end) expired = new Date(end).getTime() < Date.now();
+  } else if (emailField.type === "rich_text" || emailField.type === "title") {
+    r = await notion.databases.query({
+      database_id: MEMBER_DB_ID,
+      filter: { property: emailField.name, rich_text: { contains: email } }, // 用 contains 比 equals 更寬鬆
+      page_size: 5
+    });
+  } else {
+    // 其他型別就直接放空
+    r = { results: [] };
   }
 
-  if (!statusOK)   return { ok:false, reason:"disabled" };
-  if (expired)     return { ok:false, reason:"expired" };
+  if (!r.results?.length) return { ok:false, reason:"not_found" };
 
-  const level = p["等級"]?.select?.name || (p["等級"]?.multi_select || []).map(x=>x.name).join(",") || "";
+  // 做一次「真正比對」：避免 contains 撈到相似字串
+  const hit = r.results.find(pg => {
+    const prop = pg.properties[emailField.name];
+    const val = (emailField.type === "email")
+      ? (prop?.email || "")
+      : (emailField.type === "title" ? titleText(prop) : rtText(prop));
+    return toLower(val) === toLower(email);
+  });
+  if (!hit) return { ok:false, reason:"not_found" };
+
+  const p = hit.properties || {};
+
+  // 狀態：沒設就略過；有設且不為「啟用/Active」就擋
+  if (fields.statusName) {
+    const sv = p[fields.statusName];
+    const sname = (sv?.status?.name) || (sv?.select?.name) || "";
+    if (sname && !/^(啟用|active)$/i.test(sname)) {
+      return { ok:false, reason:"disabled" };
+    }
+  }
+
+  // 有效期限：到期就擋（空白視為不限期）
+  if (fields.expiryName) {
+    const d = p[fields.expiryName]?.date;
+    if (d) {
+      const end = d.end || d.start;
+      if (end && new Date(end).getTime() < Date.now()) {
+        return { ok:false, reason:"expired" };
+      }
+    }
+  }
+
+  // 等級（資訊用）
+  let level = "";
+  if (fields.levelName) {
+    const lv = p[fields.levelName];
+    level = lv?.select?.name || (lv?.multi_select || []).map(x=>x.name).join(",") || "";
+  }
+
   return { ok:true, level };
 }
 
-// ---------- 主處理 ----------
+// ====== 主處理 ======
 module.exports = async (req, res) => {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
-    if (!process.env.NOTION_TOKEN || !DB_ID) {
+    if (!process.env.NOTION_TOKEN || !QA_DB_ID) {
       return res.status(500).json({ error: "Missing NOTION_TOKEN or NOTION_DB_ID" });
     }
 
@@ -92,21 +171,18 @@ module.exports = async (req, res) => {
 
     // Email 檢核（空白 / 格式錯）
     const emailStr = String(email || "").trim();
-    if (!emailStr) {
-      return res.status(400).json({ error: "請輸入email" });
-    }
-    if (!isEmail(emailStr)) {
-      return res.status(400).json({ error: "email檢錯誤" });
-    }
+    if (!emailStr) return res.status(400).json({ error: "請輸入email" });
+    if (!isEmail(emailStr)) return res.status(400).json({ error: "email檢錯誤" });
 
     // 會員資格（硬性）
     const gate = await checkMember(emailStr);
     if (!gate.ok) {
       const msg =
-        gate.reason === "member_db_missing" ? "系統尚未設定會員名單，請聯絡管理員。"
-      : gate.reason === "not_found"        ? "此 Email 不在會員名單中。"
-      : gate.reason === "disabled"         ? "帳號已停用，如需啟用請聯繫我們。"
-      : gate.reason === "expired"          ? "您的會員已到期，請續約後再使用。"
+        gate.reason === "member_db_missing"  ? "系統尚未設定會員名單，請聯絡管理員。"
+      : gate.reason === "email_field_missing" ? "會員名單缺少 Email 欄位。"
+      : gate.reason === "not_found"           ? "此 Email 不在會員名單中。"
+      : gate.reason === "disabled"            ? "帳號已停用，如需啟用請聯繫我們。"
+      : gate.reason === "expired"             ? "您的會員已到期，請續約後再使用。"
       : "目前無法驗證您的資格。";
       return res.status(403).json({ error: JOIN_URL ? `${msg} 申請/續約：${JOIN_URL}` : msg });
     }
@@ -117,10 +193,10 @@ module.exports = async (req, res) => {
 
     const key = q.length > 16 ? q.slice(0, 16) : q;
 
-    // 查詢：Title → Rich text → 主題保底
+    // 查詢 QA：Title → Rich text → 主題保底
     let results = [];
     let resp = await notion.databases.query({
-      database_id: DB_ID,
+      database_id: QA_DB_ID,
       filter: { property: "問題", title: { contains: key } },
       sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
       page_size: 10
@@ -129,7 +205,7 @@ module.exports = async (req, res) => {
 
     if (!results?.length) {
       resp = await notion.databases.query({
-        database_id: DB_ID,
+        database_id: QA_DB_ID,
         filter: { property: "問題", rich_text: { contains: key } },
         sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
         page_size: 10
@@ -141,7 +217,7 @@ module.exports = async (req, res) => {
       const topic = guessTopic(q);
       if (topic) {
         resp = await notion.databases.query({
-          database_id: DB_ID,
+          database_id: QA_DB_ID,
           filter: { property: "主題", select: { equals: topic } },
           sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
           page_size: 10
