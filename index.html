@@ -11,6 +11,7 @@
     input, textarea { width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; }
     button { margin-top:14px; padding:10px 16px; border:0; border-radius:10px; cursor:pointer; background:#111827; color:#fff; }
     .muted { color:#6b7280; font-size:12px; }
+    .card { border:1px solid #e5e7eb; border-radius:16px; padding:16px; background:#fff; margin-top:12px; }
   </style>
 </head>
 <body>
@@ -31,30 +32,11 @@
   </p>
 
   <script>
-    // 簡單轉義，避免 XSS
-    function esc(s){ return (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])); }
+    const esc = (s)=> (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m]));
 
-    function renderResult(data){
-      const box = document.getElementById('result');
-      box.style.display = 'block';
-
-      // 任何錯誤或後端以字串提示時
-      if (!data || data.error || typeof data.answer === 'string') {
-        const msg = data?.error || data?.answer || '查不到相符條目，請換個關鍵字（例：肩頸痠痛）。';
-        box.innerHTML = `
-          <div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px">
-            <b style="color:#b91c1c">提示</b><br>
-            <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
-          </div>`;
-        return;
-      }
-
-      // 正常查詢結果（answer 應為物件）
-      const a = data.answer || {};
-      const ver  = data.version ? `版本：${esc(data.version)}` : '';
-      const time = data.updated_at ? `更新：${new Date(data.updated_at).toLocaleString()}` : '';
-      const matched = data.matched ? `（匹配：${esc(data.matched)}）` : '';
-
+    function cardHTML(a){
+      const ver  = a.version ? `版本：${esc(a.version)}` : '';
+      const time = a.updated_at ? `更新：${new Date(a.updated_at).toLocaleString()}` : '';
       const blocks = [];
       if (a['教材版回覆']) blocks.push(`
         <div style="margin-top:12px;line-height:1.7">
@@ -68,27 +50,44 @@
         <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
           <b>經絡與補充</b><br>${esc(a['經絡與補充'])}
         </div>`);
-
       const pro = a['臨床流程建議'] ? `
         <details style="margin-top:12px">
           <summary style="cursor:pointer;color:#2563eb">臨床流程建議（專業版）</summary>
           <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div>
         </details>` : '';
-
-      box.innerHTML = `
-        <div style="border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#fff">
-          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
-            <div>
-              <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
-              <div class="muted">主題：${esc(a['主題']||'-')} ${matched}</div>
-            </div>
-          </div>
-
+      return `
+        <div class="card">
+          <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
+          <div class="muted">主題：${esc(a['主題']||'-')}</div>
           ${blocks.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
           ${pro}
-
           <div class="muted" style="margin-top:12px">${ver}　${time}</div>
         </div>`;
+    }
+
+    function renderResult(data){
+      const box = document.getElementById('result');
+      box.style.display = 'block';
+
+      // 錯誤或查無資料（或後端回字串提示）
+      if (!data || data.error || typeof data.answer === 'string') {
+        const msg = data?.error || data?.answer || '查不到相符條目，請換個關鍵字（例：肩頸痠痛）。';
+        box.innerHTML = `
+          <div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px">
+            <b style="color:#b91c1c">提示</b><br>
+            <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
+          </div>`;
+        return;
+      }
+
+      // 有多筆 items 就逐一顯示；否則顯示單筆 answer（相容舊版）
+      const items = Array.isArray(data.items) && data.items.length ? data.items : null;
+      if (items) {
+        const header = `<div class="muted">找到 ${items.length} 筆結果（匹配：${esc(data.matched || '')}）</div>`;
+        box.innerHTML = header + items.map(cardHTML).join("");
+      } else {
+        box.innerHTML = cardHTML(data.answer || {});
+      }
     }
 
     document.getElementById('send').onclick = async () => {
@@ -97,11 +96,9 @@
         question: document.getElementById('q').value,
         mode: '查詢'
       };
-
       const box = document.getElementById('result');
       box.style.display = 'block';
       box.innerHTML = '<div style="padding:8px;color:#6b7280">查詢中…</div>';
-
       try {
         const resp = await fetch('/api/answer', {
           method: 'POST',
