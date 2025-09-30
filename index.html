@@ -30,97 +30,65 @@
   </p>
 
   <script>
-    function esc(s){ return (s??"").toString().replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])); }
+function esc(s){ return (s??"").toString().replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[m])); }
 
-    function renderResult(data){
-      const box = document.getElementById('result');
-      box.style.display = 'block';
+function renderResult(data){
+  const box = document.getElementById('result');
+  box.style.display = 'block';
 
-      // 錯誤或查無資料（或後端回字串提示）
-      if (!data || data.error || typeof data.answer === 'string') {
-        const msg = data?.error || data?.answer || '查不到相符條目，請換個問法（例：肩頸痠痛）。';
-        box.innerHTML = `
-          <div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px">
-            <b style="color:#b91c1c">提示</b><br>
-            <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
-          </div>`;
-        return;
-      }
+  // 錯誤或查無資料（或後端回字串提示）
+  if (!data || data.error || typeof data.answer === 'string') {
+    const msg = data?.error || data?.answer || '查不到相符條目，請換個問法（例：肩頸痠痛）。';
+    box.innerHTML = `
+      <div style="border:1px solid #fecaca;background:#fff1f2;border-radius:12px;padding:14px">
+        <b style="color:#b91c1c">提示</b><br>
+        <div style="margin-top:8px;white-space:pre-wrap">${esc(msg)}</div>
+      </div>`;
+    return;
+  }
 
-      // 正常查詢結果（answer 為物件）
-      const a = data.answer || {};
-      const ver  = data.version ? `版本：${esc(data.version)}` : '';
-      const time = data.updated_at ? `更新：${new Date(data.updated_at).toLocaleString()}` : '';
-      const matched = data.matched ? `（匹配：${esc(data.matched)}）` : '';
+  // 正常查詢結果
+  const a = data.answer || {};
+  const ver  = data.version ? `版本：${esc(data.version)}` : '';
+  const time = data.updated_at ? `更新：${new Date(data.updated_at).toLocaleString()}` : '';
+  const matched = data.matched ? `（匹配：${esc(data.matched)}）` : '';
 
-      const blocks = [];
-      if (a['教材版回覆']) blocks.push(`
-        <div style="margin-top:12px;line-height:1.7">
-          <b>教材版回覆</b><br>${esc(a['教材版回覆'])}
-        </div>`);
-      if (a['對應脊椎分節']) blocks.push(`
-        <div style="margin-top:12px;line-height:1.7">
-          <b>對應脊椎分節</b><br>${esc(a['對應脊椎分節'])}
-        </div>`);
-      if (a['經絡與補充']) blocks.push(`
-        <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
-          <b>經絡與補充</b><br>${esc(a['經絡與補充'])}
-        </div>`);
+  const blocks = [];
+  if (a['教材版回覆']) blocks.push(`
+    <div style="margin-top:12px;line-height:1.7">
+      <b>教材版回覆</b><br>${esc(a['教材版回覆'])}
+    </div>`);
+  if (a['對應脊椎分節']) blocks.push(`
+    <div style="margin-top:12px;line-height:1.7">
+      <b>對應脊椎分節</b><br>${esc(a['對應脊椎分節'])}
+    </div>`);
+  if (a['經絡與補充']) blocks.push(`
+    <div style="margin-top:12px;line-height:1.7;background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px">
+      <b>經絡與補充</b><br>${esc(a['經絡與補充'])}
+    </div>`);
 
-      const pro = a['臨床流程建議'] ? `
-        <details style="margin-top:12px">
-          <summary style="cursor:pointer;color:#2563eb">臨床流程建議（專業版）</summary>
-          <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div>
-        </details>` : '';
+  const pro = a['臨床流程建議'] ? `
+    <details style="margin-top:12px">
+      <summary style="cursor:pointer;color:#2563eb">臨床流程建議（專業版）</summary>
+      <div style="margin-top:8px;white-space:pre-wrap;line-height:1.7">${esc(a['臨床流程建議'])}</div>
+    </details>` : '';
 
-      // 一鍵複製
-      const copyText =
-        (a['教材版回覆'] || '') +
-        (a['對應脊椎分節'] ? `\n對應脊椎分節：${a['對應脊椎分節']}` : '') +
-        (a['經絡與補充'] ? `\n經絡與補充：${a['經絡與補充']}` : '');
+  box.innerHTML = `
+    <div style="border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#fff">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+        <div>
+          <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
+          <div style="color:#6b7280;font-size:12px">主題：${esc(a['主題']||'-')} ${matched}</div>
+        </div>
+      </div>
 
-      const copyBtn = `
-        <button onclick="navigator.clipboard.writeText(${JSON.stringify(copyText)}); this.textContent='已複製'; setTimeout(()=>this.textContent='複製內容',1200);"
-          style="border:1px solid #e5e7eb;border-radius:10px;padding:6px 10px;cursor:pointer">複製內容</button>`;
+      ${blocks.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
+      ${pro}
 
-      box.innerHTML = `
-        <div style="border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#fff">
-          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
-            <div>
-              <div style="font-size:18px;font-weight:700">🧾 ${esc(a['問題']||'回覆')}</div>
-              <div class="muted" style="font-size:12px">主題：${esc(a['主題']||'-')} ${matched}</div>
-            </div>
-            ${copyBtn}
-          </div>
+      <div style="margin-top:12px;color:#6b7280;font-size:12px">${ver}　${time}</div>
+    </div>`;
+}
+</script>
 
-          ${blocks.join('') || '<div style="margin-top:12px;color:#6b7280">（此條目尚無內容）</div>'}
-          ${pro}
-
-          <div class="muted" style="margin-top:12px;font-size:12px">${ver}　${time}</div>
-        </div>`;
-    }
-
-    document.getElementById('send').onclick = async () => {
-      const body = {
-        email: document.getElementById('email').value,
-        question: document.getElementById('q').value,
-        mode: '查詢'
-      };
-      const box = document.getElementById('result');
-      box.style.display = 'block';
-      box.innerHTML = '<div style="padding:8px;color:#6b7280">查詢中…</div>';
-      try {
-        const resp = await fetch('/api/answer', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify(body)
-        });
-        const data = await resp.json();
-        renderResult(data);
-      } catch (e) {
-        renderResult({ error: String(e) });
-      }
-    };
-  </script>
 </body>
 </html>
