@@ -37,10 +37,32 @@ function pageToItem(page){
   };
 }
 
-// ---------- 會員檢核 ----------
+// 取得「台北時區」今天的 YYYY-MM-DD 文字（用於字串比較）
+function taipeiTodayYMD() {
+  const d = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
+  // 轉成 YYYY-MM-DD
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// 從 Notion page properties 取出到期日（支援「有效日期」或「有效期限」）
+function extractExpireDateYMD(p) {
+  const d1 = p["有效日期"]?.date;
+  const d2 = p["有效期限"]?.date;
+  const d = d1 || d2;
+  if (!d) return null;
+  const end = d.end || d.start;
+  if (!end) return null;
+  // Notion 回來通常是 ISO 字串，取前 10 碼（YYYY-MM-DD）
+  return String(end).slice(0, 10);
+}
+
+// ---------- 會員檢核（狀態 + 到期日） ----------
 async function checkMember(email){
   if (!MEMBER_DB) {
-    // 未設定會員DB時，為避免誤鎖全部，預設放行；要強制一定檢核可改成 return { ok:false, reason:"未設定會員DB" }
+    // 未設定會員DB時，為避免誤鎖全部，預設放行
     return { ok: true, level: "" };
   }
   // 以 Email 型別查
@@ -60,22 +82,21 @@ async function checkMember(email){
   if (!r.results?.length) return { ok: false, reason: "not_found" };
 
   const p = r.results[0].properties || {};
+
+  // 狀態必須為「啟用」
   const statusName =
     (p["狀態"]?.status?.name) ||
     (p["狀態"]?.select?.name) || "";
-  const statusOK = !statusName || statusName === "啟用";
+  const statusOK = statusName === "啟用";
+  if (!statusOK) return { ok:false, reason:"disabled" };
 
-  // 到期檢查（空白視為不限期）
-  let expired = false;
-  const d = p["有效期限"]?.date;
-  if (d) {
-    const end = d.end || d.start;
-    if (end) expired = new Date(end).getTime() < Date.now();
-  }
+  // 到期檢查（欄位允許是「有效日期」或「有效期限」，任一存在即採用；空白視為不限期）
+  const today = taipeiTodayYMD();
+  const expireYMD = extractExpireDateYMD(p); // 可能為 null
+  const notExpired = !expireYMD || expireYMD >= today; // 以字串比較 YYYY-MM-DD
+  if (!notExpired) return { ok:false, reason:"expired" };
 
-  if (!statusOK)   return { ok:false, reason:"disabled" };
-  if (expired)     return { ok:false, reason:"expired" };
-
+  // 等級（可選）
   const level =
     p["等級"]?.select?.name ||
     (p["等級"]?.multi_select || []).map(x=>x.name).join(",") || "";
@@ -95,7 +116,7 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "請輸入有效 Email 才能使用。" });
     }
 
-    // 會員檢核
+    // 會員檢核（狀態 + 到期）
     const gate = await checkMember(email);
     if (!gate.ok) {
       const msg =
