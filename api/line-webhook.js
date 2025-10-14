@@ -1,7 +1,7 @@
 // api/line-webhook.js  (Vercel Serverless Function)
 export const config = { runtime: 'edge' }; // 低延遲
 
-const GAS_URL = 'https://script.google.com/macros/s/AKfycby97zxR6yMPXHT50go8c6slTujMP0B9pxnlqCluHERABUtTOsdowfblbwv7taxYNrGt/exec'; // ← 換成你的 /exec
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxScmirqUGjNbdJP8nkEB_FEOpo5Yl4kR853cjb59ahhgO2lndn3gjLej58lA4Dxk_Z/exec'; // ← 換成你的 /exec
 
 export default async function handler(req) {
   try {
