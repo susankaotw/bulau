@@ -8,36 +8,34 @@ const NOTION_TOKEN = process.env.NOTION_API_KEY;     // 可省略，未設定就
 const RECORD_DB_ID = process.env.RECORD_DB_ID;       // 可省略，未設定就不寫 Notion
 
 module.exports = async (req, res) => {
-  // 1) LINE 的 Verify 可能發 GET，回 200 立刻通過
-  if (req.method === "GET") {
-    return res.status(200).send("OK");
-  }
-
-  // 2) 只接受 POST
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, reason: "method_not_allowed" });
-  }
+  // 1) LINE 的 Verify 可能發 GET
+  if (req.method === "GET") return res.status(200).send("OK");
+  if (req.method !== "POST") return res.status(405).json({ ok: false, reason: "method_not_allowed" });
 
   try {
-    const body = req.body || {};
+    // 解析 body（某些情況是字串）
+    let body = req.body || {};
+    if (typeof body === "string") { try { body = JSON.parse(body); } catch {} }
+
     const events = Array.isArray(body.events) ? body.events : [];
+    if (!events.length) {
+      console.log("[webhook] no events");
+      return res.status(200).json({ ok: true, note: "no_events" });
+    }
 
-    // 3) 逐則處理（不要阻塞回應）
-    const tasks = events.map(ev => handleEvent(ev).catch(err => {
-      console.error("[handleEvent]", err && (err.stack || err.message || err));
-    }));
+    // 逐則處理並「等待完成」後再回 200（避免 Vercel 結束執行環境）
+    // handleEvent 內已對外部 fetch 設了 timeout，不易超時
+    await Promise.allSettled(events.map(ev => handleEvent(ev)));
 
-    // 不要等待所有外部 I/O 完成（避免超時），我們只要確保有啟動處理即可
-    // Promise.allSettled(tasks) 會等完，這裡不要 await
-    // 直接回 200，讓 LINE 不會 timeout
-    res.status(200).json({ ok: true });
-
+    return res.status(200).json({ ok: true });
   } catch (e) {
     console.error("[webhook] error", e && (e.stack || e.message || e));
     // 仍回 200，避免 LINE 重送
-    res.status(200).json({ ok: false });
+    return res.status(200).json({ ok: false });
   }
 };
+
+console.log("[event]", ev.type, ev.source?.userId, ev.message?.type, ev.message?.text);
 
 async function handleEvent(ev) {
   if (ev.type !== "message" || ev.message?.type !== "text") return;
