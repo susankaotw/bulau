@@ -123,40 +123,71 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 5) 其它：視為症狀查詢
-  const info = await requireMemberByUid(userId, replyToken);
-  if (!info) return;
+ // 5) 其它：視為症狀查詢（強化版：帶診斷寫入 Notion）
+const info = await requireMemberByUid(userId, replyToken);
+if (!info) return;
 
-  // 先記錄查詢（不中斷）
-  writeRecordSafe({ email: info.email, userId, category:"症狀查詢", content: rawText }).catch(()=>{});
+// 先記錄查詢（不中斷）
+writeRecordSafe({
+  email: info.email, userId, category: "症狀查詢", content: rawText
+}).catch(() => {});
 
-  // 查症狀（同送 q & question，避免後端鍵名不一致）
-  const ans = await postJSON(ANSWER_URL, { q, question: q, email: info.email }, 5000);
-  const results = Array.isArray(ans?.results) ? ans.results : [];
+// 1) 關鍵字保底：同送 q / question；若 q 為空就退回 rawText
+const qPayload = q || rawText;
 
-  let seg="—", tip="—", mer="—", replyMsg="";
-  if (results.length) {
-    const r = results[0] || {};
-    seg = r.segments || r.segment || "—";
-    tip = r.tips || r.summary || r.reply || "—";
-    mer = (Array.isArray(r.meridians) && r.meridians.length) ? r.meridians.join("、") : "—";
-    replyMsg = `🔎 查詢：「${q}」\n對應脊椎分節：${seg}\n經絡與補充：${mer}\n教材重點：${tip}`;
-  } else if (ans?.answer?.臨床流程建議) { // 舊版相容
-    seg = ans.answer.對應脊椎分節 || "—";
-    tip = ans.answer.臨床流程建議 || "—";
-    replyMsg = `🔎 查詢：「${q}」\n建議分節：${seg}\n臨床流程：${tip}`;
-  } else {
-    replyMsg = `找不到「${q}」的教材內容。\n可改試：肩頸、頭暈、胸悶、胃痛、腰痠。`;
-  }
+// 2) 呼叫答案 API（帶 email 做授權）
+const ans = await postJSON(
+  ANSWER_URL,
+  { q: qPayload, question: qPayload, email: info.email },
+  5000
+);
 
-  await replyOrPush(replyToken, userId, replyMsg);
+// 3) 解析結果
+const results = Array.isArray(ans?.results) ? ans.results : [];
+let seg = "—", tip = "—", mer = "—", replyMsg = "";
 
-  // 回填最新一筆症狀查詢結果
+if (results.length) {
+  const r = results[0] || {};
+  seg = r.segments || r.segment || "—";
+  tip = r.tips || r.summary || r.reply || "—";
+  mer = (Array.isArray(r.meridians) && r.meridians.length) ? r.meridians.join("、") : "—";
+  replyMsg = `🔎 查詢：「${qPayload}」\n對應脊椎分節：${seg}\n經絡與補充：${mer}\n教材重點：${tip}`;
+} else if (ans?.answer?.臨床流程建議) { // 舊版相容
+  seg = ans.answer.對應脊椎分節 || "—";
+  tip = ans.answer.臨床流程建議 || "—";
+  replyMsg = `🔎 查詢：「${qPayload}」\n建議分節：${seg}\n臨床流程：${tip}`;
+} else {
+  // 4) 失敗：把診斷資訊寫回上一筆記錄（方便你在 Notion 看到原始回應）
+  const httpCode = typeof ans?.http === "number" ? String(ans.http) : "";
+  const diag = {
+    http: httpCode || "200",
+    error: ans?.error || "",
+    // raw 最多截取 900 字，避免超過 Notion 欄位長度
+    raw: (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 900)
+  };
+
+  updateLastSymptomRecordSafe({
+    email: info.email,
+    userId,
+    seg: "",
+    tip: `❗API 診斷：${JSON.stringify(diag)}`,
+    httpCode: diag.http
+  }).catch(() => {});
+
+  replyMsg = `找不到「${qPayload}」的教材內容。\n可改試：肩頸、頭暈、胸悶、胃痛、腰痠。`;
+}
+
+// 5) 回覆使用者
+await replyOrPush(replyToken, userId, replyMsg);
+
+// 6) 成功時也把對應分節/AI 回覆補寫回記錄
+if (replyMsg && (seg !== "—" || tip !== "—")) {
   updateLastSymptomRecordSafe({
     email: info.email, userId, seg, tip,
     httpCode: typeof ans?.http === "number" ? String(ans.http) : "200"
-  }).catch(()=>{});
+  }).catch(() => {});
 }
+
 
 /* --------------------------- 會員解析（UserId為主） --------------------------- */
 async function requireMemberByUid(userId, replyToken) {
