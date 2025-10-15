@@ -187,7 +187,7 @@ if (replyMsg && (seg !== "—" || tip !== "—")) {
     httpCode: typeof ans?.http === "number" ? String(ans.http) : "200"
   }).catch(() => {});
 }
-
+}
 
 /* --------------------------- 會員解析（UserId為主） --------------------------- */
 async function requireMemberByUid(userId, replyToken) {
