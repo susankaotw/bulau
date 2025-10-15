@@ -7,7 +7,7 @@
 // ————————————————
 
 /** ===== Env (相容雙命名) ===== */
-const LINE_TOKEN   = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
+//const LINE_TOKEN   = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 const GUARD_URL    = process.env.BULAU_GUARD_URL  || "https://bulau.vercel.app/api/guard";
 const ANSWER_URL   = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 const NOTION_KEY   = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || ""; // ← 統一用這個
@@ -20,13 +20,15 @@ async function handler(req, res) {
     if (req.method !== "POST") return res.status(405).json({ ok: false, reason: "method_not_allowed" });
 
     // 健檢（不印 token 值，只印長度）
-    console.log("[env-check]", {
-      line_token_len: LINE_TOKEN ? LINE_TOKEN.length : 0,
-      has_guard: !!GUARD_URL,
-      has_answer: !!ANSWER_URL,
-      has_notion_key: !!NOTION_KEY,
-      has_record_db: !!RECORD_DB_ID
-    });
+ console.log("[env-check]", {
+  line_token_len: (process.env.LINE_CHANNEL_ACCESS_TOKEN || "").length,
+  keys_like_line: Object.keys(process.env).filter(k => k.includes("LINE")).slice(0, 20),
+  has_guard: !!process.env.BULAU_GUARD_URL,
+  has_answer: !!process.env.BULAU_ANSWER_URL,
+  has_notion_key: !!(process.env.NOTION_API_KEY || process.env.NOTION_TOKEN),
+  has_record_db: !!process.env.RECORD_DB_ID
+});
+
 
     // 解析 body（避免某些平台 req.body 為字串或空）
     let body = req.body;
@@ -145,24 +147,57 @@ async function replyOrPush(replyToken, userId, text) {
 }
 
 async function replyText(replyToken, text) {
+  const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || ""; // ← 現場拿
   try {
     const r = await fetch("https://api.line.me/v2/bot/message/reply", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${LINE_TOKEN}` },
-      body: JSON.stringify({ replyToken, messages: [{ type: "text", text: String(text).slice(0, 4900) }] })
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${LINE_TOKEN}`
+      },
+      body: JSON.stringify({
+        replyToken,
+        messages: [{ type: "text", text: String(text).slice(0, 4900) }]
+      })
     });
     if (!r.ok) {
       const t = await r.text();
-      console.error("[replyText] http", r.status, t);
+      console.error("[replyText] http", r.status, t, "len=", LINE_TOKEN.length);
       return false;
     }
-    console.log("[replyText] ok");
+    console.log("[replyText] ok len=", LINE_TOKEN.length);
     return true;
   } catch (e) {
-    console.error("[replyText_error]", e?.message || e);
+    console.error("[replyText_error]", e && (e.message || e));
     return false;
   }
 }
+
+async function pushText(to, text) {
+  const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || ""; // ← 現場拿
+  try {
+    const r = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${LINE_TOKEN}`
+      },
+      body: JSON.stringify({
+        to,
+        messages: [{ type: "text", text: String(text).slice(0, 4900) }]
+      })
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      console.error("[pushText] http", r.status, t, "len=", LINE_TOKEN.length);
+    } else {
+      console.log("[pushText] ok len=", LINE_TOKEN.length);
+    }
+  } catch (e) {
+    console.error("[pushText_error]", e && (e.message || e));
+  }
+}
+
 
 async function pushText(to, text) {
   try {
