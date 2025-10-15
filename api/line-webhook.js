@@ -1,4 +1,13 @@
-// api/line-webhook.js — Production-ready + 綁定 email 指令
+// api/line-webhook.js — Production-ready 全功能版
+// 功能：debug / 綁定 email / 我的狀態 / 簽到 / 心得 / 症狀查詢（含 Notion 記錄）
+// 需要的環境變數（Vercel 專案層，Production/Preview/Development 全勾）
+// LINE_CHANNEL_ACCESS_TOKEN
+// BULAU_GUARD_URL        = https://bulau.vercel.app/api/guard
+// BULAU_ANSWER_URL       = https://bulau.vercel.app/api/answer
+// NOTION_API_KEY 或 NOTION_TOKEN（其一即可）
+// NOTION_MEMBER_DB_ID    = 會員 DB（含欄位「Email」「LINE UserId」「狀態」「有效期限/有效日期」「等級」）
+// RECORD_DB_ID           = 學員紀錄 DB（含欄位「標題」「Email」「UserId」「類別」「內容」「日期」「來源」「AI回覆」「對應脊椎分節」「API回應碼」）
+
 const GUARD_URL  = process.env.BULAU_GUARD_URL  || "https://bulau.vercel.app/api/guard";
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 
@@ -41,7 +50,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 1) 綁定 email 指令：綁定 email you@domain.com
+  // 1) 綁定 email：綁定 email you@domain.com
   const m = /^綁定\s*email\s+([^\s@]+@[^\s@]+\.[^\s@]+)$/i.exec(rawText.replace(/\u3000/g," "));
   if (m) {
     const email = m[1].toLowerCase();
@@ -53,15 +62,54 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 2) 以 userId 換 email（/api/guard）
-  const guard = await postJSON(GUARD_URL, { uid: userId }, 3500);
-  const email = guard?.ok && guard?.email ? String(guard.email).trim().toLowerCase() : "";
+  // 2) 我的狀態 / 我的帳號
+  if (/^我的(狀態|帳號)$/.test(q)) {
+    const info = await findMemberByUserId(userId);
+    if (!info || !info.email) {
+      await replyOrPush(replyToken, userId, "❗尚未綁定 Email，請輸入：綁定 email your@mail.com");
+      return;
+    }
+    await replyOrPush(replyToken, userId, renderStatusCard(info));
+    return;
+  }
+
+  // 3) 簽到 xxx
+  if (/^簽到/.test(q)) {
+    const content = rawText.replace(/^簽到(\s*|：|:)?/i, "").trim();
+    if (!content) { await replyOrPush(replyToken, userId, "簽到 內容不能空白喔～\n例：簽到 胸椎T6呼吸 10分鐘"); return; }
+
+    const email = await resolveEmailByUid(userId);
+    if (!email) { await replyOrPush(replyToken, userId, "❗尚未綁定 Email，請輸入：綁定 email your@mail.com"); return; }
+
+    await writeRecordSafe({ email, userId, category:"簽到", content });
+    await replyOrPush(replyToken, userId, `✅ 已記錄簽到：${content}\n持續練習，身體會越來越平衡🌿`);
+    return;
+  }
+
+  // 4) 心得 xxx
+  if (/^心得/.test(q)) {
+    const content = rawText.replace(/^心得(\s*|：|:)?/i, "").trim();
+    if (!content) { await replyOrPush(replyToken, userId, "心得 內容不能空白喔～\n例：心得 今天練習C1放鬆"); return; }
+
+    const email = await resolveEmailByUid(userId);
+    if (!email) { await replyOrPush(replyToken, userId, "❗尚未綁定 Email，請輸入：綁定 email your@mail.com"); return; }
+
+    await writeRecordSafe({ email, userId, category:"心得", content });
+    await replyOrPush(replyToken, userId, "📝 已記錄心得！\n要不要我幫你「歸納重點」？回覆：歸納");
+    return;
+  }
+
+  // 5) 一般句子：視為症狀查詢
+  const email = await resolveEmailByUid(userId);
   if (!email) {
     await replyOrPush(replyToken, userId, "❗尚未綁定 Email，請輸入：綁定 email your@mail.com");
     return;
   }
 
-  // 3) 查症狀（/api/answer）
+  // 先記錄查詢（不中斷）
+  writeRecordSafe({ email, userId, category:"症狀查詢", content: rawText }).catch(()=>{});
+
+  // 查症狀（同送 q & question）
   const ans = await postJSON(ANSWER_URL, { q, question: q, email }, 5000);
   const results = Array.isArray(ans?.results) ? ans.results : [];
 
@@ -82,37 +130,83 @@ async function handleEvent(ev) {
 
   await replyOrPush(replyToken, userId, replyMsg);
 
-  // 4) 背景寫 Notion（可選）
-  const NOTION_KEY   = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
-  const RECORD_DB_ID = process.env.RECORD_DB_ID || "";
-  if (NOTION_KEY && RECORD_DB_ID) {
-    writeRecord({
-      email, userId, category:"症狀查詢", content: rawText,
-      seg, tip, statusCode: typeof ans?.http === "number" ? String(ans.http) : "200",
-      NOTION_KEY, RECORD_DB_ID
-    }).catch(e => console.error("[writeRecord]", e?.message || e));
-  }
+  // 回填最新一筆症狀查詢的 AI 結果（不中斷）
+  updateLastSymptomRecordSafe({ email, userId, seg, tip, httpCode: typeof ans?.http === "number" ? String(ans.http) : "200" }).catch(()=>{});
 }
 
-/* ---------- 綁定 email 到 Notion 會員 DB ---------- */
+/* ---------- Email 解析：guard 先查；不行就 Notion 直查 ---------- */
+async function resolveEmailByUid(userId) {
+  // 先 guard
+  const guard = await postJSON(GUARD_URL, { uid: userId }, 3500);
+  if (guard?.ok && guard?.email) return String(guard.email).trim().toLowerCase();
+  // 再 Notion 直查
+  const info = await findMemberByUserId(userId);
+  return info?.email ? info.email.toLowerCase() : "";
+}
+
+/* ---------- Notion：用 LINE UserId 直查會員資訊 ---------- */
+async function findMemberByUserId(userId) {
+  const NOTION_KEY   = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
+  const MEMBER_DB_ID = process.env.NOTION_MEMBER_DB_ID || "";
+  if (!NOTION_KEY || !MEMBER_DB_ID || !userId) return null;
+
+  // 讀 schema 找 title 欄位
+  const db = await fetch(`https://api.notion.com/v1/databases/${MEMBER_DB_ID}`, {
+    method: "GET",
+    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": "2022-06-28" }
+  }).then(r => r.json()).catch(() => null);
+  const props = db?.properties || {};
+  const titleProp = Object.keys(props).find(k => props[k]?.type === "title") || "名稱";
+
+  // 依序嘗試：LINE UserId（rich_text）→ title === uid（少數人把 uid 放 title）
+  const url = `https://api.notion.com/v1/databases/${MEMBER_DB_ID}/query`;
+  const tries = [
+    { filter: { property: "LINE UserId", rich_text: { equals: userId } }, page_size: 1 },
+    { filter: { property: titleProp, title: { equals: userId } }, page_size: 1 },
+  ];
+
+  let page = null;
+  for (const body of tries) {
+    const j = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${NOTION_KEY}`,
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }).then(r => r.json()).catch(() => null);
+    if (Array.isArray(j?.results) && j.results.length) { page = j.results[0]; break; }
+  }
+  if (!page) return null;
+
+  const p = page.properties || {};
+  const email = p.Email?.email || (p.Email?.rich_text?.[0]?.plain_text) || "";
+  const statusName = (p["狀態"]?.status?.name) || (p["狀態"]?.select?.name) || "";
+  const d = p["有效期限"]?.date || p["有效日期"]?.date;
+  const expire = d ? (d.end || d.start || "").slice(0,10) : "";
+  const level = p["等級"]?.select?.name ||
+                (Array.isArray(p["等級"]?.multi_select) ? p["等級"].multi_select.map(x=>x.name).join(",") : "");
+
+  return { email, statusName, expire, level, pageId: page.id };
+}
+
+/* ---------- 綁定 email → 把 LINE UserId 寫進 Notion 會員 DB ---------- */
 async function bindEmailToNotion(email, userId) {
   try {
-    const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
+    const NOTION_KEY   = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
     const MEMBER_DB_ID = process.env.NOTION_MEMBER_DB_ID || "";
     if (!NOTION_KEY || !MEMBER_DB_ID) return false;
 
-    // 1) 讀 DB schema 找出 title 欄位名稱（有些人把 Email 放在 title）
+    // 讀 schema 找 title 欄位
     const db = await fetch(`https://api.notion.com/v1/databases/${MEMBER_DB_ID}`, {
       method:"GET",
-      headers:{
-        "Authorization":`Bearer ${NOTION_KEY}`,
-        "Notion-Version":"2022-06-28"
-      }
+      headers:{ "Authorization":`Bearer ${NOTION_KEY}`, "Notion-Version":"2022-06-28" }
     }).then(r=>r.json()).catch(()=>null);
     const props = db?.properties || {};
     let titlePropName = Object.keys(props).find(k => props[k]?.type === "title") || "名稱";
 
-    // 2) 依序嘗試三種篩選：title === email、Email[email]、Email[rich_text]
+    // 依序嘗試三種篩選：title === email、Email[email]、Email[rich_text]
     const url = `https://api.notion.com/v1/databases/${MEMBER_DB_ID}/query`;
     const tryBodies = [
       { filter: { property: titlePropName, title: { equals: email } }, page_size: 1 },
@@ -136,7 +230,7 @@ async function bindEmailToNotion(email, userId) {
     }
     if (!page) return false;
 
-    // 3) 更新該頁面的「LINE UserId」欄位
+    // 更新「LINE UserId」
     const update = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
       method:"PATCH",
       headers:{
@@ -145,9 +239,7 @@ async function bindEmailToNotion(email, userId) {
         "Content-Type":"application/json"
       },
       body: JSON.stringify({
-        properties: {
-          "LINE UserId": { rich_text: [{ text: { content: userId } }] }
-        }
+        properties: { "LINE UserId": { rich_text: [{ text: { content: userId } }] } }
       })
     });
     return update.ok;
@@ -157,7 +249,97 @@ async function bindEmailToNotion(email, userId) {
   }
 }
 
-/* ---------- 基礎工具 ---------- */
+/* ---------- Notion 記錄（寫入 / 回填最新症狀） ---------- */
+async function writeRecordSafe({ email, userId, category, content }) {
+  try {
+    const NOTION_KEY   = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
+    const RECORD_DB_ID = process.env.RECORD_DB_ID || "";
+    if (!NOTION_KEY || !RECORD_DB_ID) return;
+
+    const nowISO = new Date().toISOString();
+    const payload = {
+      parent: { database_id: RECORD_DB_ID },
+      properties: {
+        "標題": { title: [{ text: { content: `${category}｜${new Date(nowISO).toLocaleString("zh-TW",{ timeZone:"Asia/Taipei" })}` } }] },
+        "Email": { email },
+        "UserId": { rich_text: [{ text: { content: userId } }] },
+        "類別": { select: { name: category } },
+        "內容": { rich_text: [{ text: { content } }] },
+        "日期": { date: { start: nowISO } },
+        "來源": { rich_text: [{ text: { content: "LINE" } }] }
+      }
+    };
+
+    const r = await fetch("https://api.notion.com/v1/pages", {
+      method:"POST",
+      headers:{
+        "Authorization":`Bearer ${NOTION_KEY}`,
+        "Notion-Version":"2022-06-28",
+        "Content-Type":"application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!r.ok) console.error("[notion create] http", r.status, await r.text());
+  } catch (e) {
+    console.error("[writeRecordSafe]", e?.message || e);
+  }
+}
+
+async function updateLastSymptomRecordSafe({ email, userId, seg, tip, httpCode }) {
+  try {
+    const NOTION_KEY   = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
+    const RECORD_DB_ID = process.env.RECORD_DB_ID || "";
+    if (!NOTION_KEY || !RECORD_DB_ID) return;
+
+    const q = {
+      filter: {
+        and: [
+          { property: "Email", email: { equals: email } },
+          { property: "UserId", rich_text: { equals: userId } },
+          { property: "類別", select: { equals: "症狀查詢" } }
+        ]
+      },
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+      page_size: 1
+    };
+
+    const list = await fetch(`https://api.notion.com/v1/databases/${RECORD_DB_ID}/query`, {
+      method:"POST",
+      headers:{
+        "Authorization":`Bearer ${NOTION_KEY}`,
+        "Notion-Version":"2022-06-28",
+        "Content-Type":"application/json"
+      },
+      body: JSON.stringify(q)
+    }).then(r=>r.json());
+
+    const page = Array.isArray(list?.results) && list.results[0];
+    if (!page) return;
+
+    const patch = {
+      properties: {
+        ...(seg ? { "對應脊椎分節": { rich_text: [{ text: { content: seg } }] } } : {}),
+        ...(tip ? { "AI回覆": { rich_text: [{ text: { content: String(tip).slice(0, 2000) } }] } } : {}),
+        ...(httpCode ? { "API回應碼": { rich_text: [{ text: { content: httpCode } }] } } : {}),
+      }
+    };
+
+    const r = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
+      method:"PATCH",
+      headers:{
+        "Authorization":`Bearer ${NOTION_KEY}`,
+        "Notion-Version":"2022-06-28",
+        "Content-Type":"application/json"
+      },
+      body: JSON.stringify(patch)
+    });
+    if (!r.ok) console.error("[notion patch] http", r.status, await r.text());
+  } catch (e) {
+    console.error("[updateLastSymptomRecordSafe]", e?.message || e);
+  }
+}
+
+/* ---------- 基礎工具（HTTP / LINE 回覆 / 文本處理 / debug） ---------- */
 
 function normalize(s){ if(!s) return ""; let t=String(s).replace(/\u3000/g," ").replace(/\s+/g,""); if(t==="肩") t="肩頸"; return t; }
 
@@ -224,6 +406,6 @@ function renderEnvDiag(){
   ].join("\n");
 }
 
-/* CJS + ESM */
+/* CJS + ESM 匯出 */
 module.exports = handler;
 export default handler;
