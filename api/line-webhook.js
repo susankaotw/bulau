@@ -40,75 +40,77 @@ exports.default = module.exports;
 
 /* --------------------------- 事件處理 --------------------------- */
 async function handleEvent(ev) {
- 
-  // === 放在 handleEvent 最前面幾個 if 之前 ===
-// 1) debug schema：列出學員紀錄 DB 欄位名與型別（確認有沒有 AI回覆 / 對應脊椎分節 / UserId）
-if (/^debug\s+schema$/i.test(q)) {
-  const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
-  const DB  = process.env.RECORD_DB_ID || "";
-  if (!KEY || !DB) { await replyOrPush(replyToken, userId, "紀錄DB或金鑰未設"); return; }
-  const j = await fetch(`https://api.notion.com/v1/databases/${DB}`, {
-    method: "GET",
-    headers: { "Authorization": `Bearer ${KEY}`, "Notion-Version": "2022-06-28" }
-  }).then(r=>r.json()).catch(()=> ({}));
-  const lines = ["📘 RECORD_DB schema"];
-  if (j?.properties) {
-    Object.keys(j.properties).forEach(k => lines.push(`• ${k} : ${j.properties[k].type}`));
-  } else {
-    lines.push("（讀不到 schema）");
-  }
-  await replyOrPush(replyToken, userId, lines.join("\n"));
-  return;
-}
-
-// 2) debug 記錄：先寫一筆『症狀查詢』，再嘗試回填 AI回覆，看 patch 是否 200
-if (/^debug\s+記錄$/i.test(q)) {
-  const info = await requireMemberByUid(userId, replyToken);
-  if (!info) return;
-  await writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: "debug 測試" });
-  const ok = await (async () => {
-    try {
-      await updateLastSymptomRecordSafe({ email: info.email, userId, seg: "T6", tip: "這是debug回填", httpCode: "200" });
-      return true;
-    } catch { return false; }
-  })();
-  await replyOrPush(replyToken, userId, ok ? "✅ 記錄+回填 OK" : "❌ 回填失敗，請用 debug schema 檢查欄位名/型別");
-  return;
-}
-
-// 3) debug 答 XXX：直接打 ANSWER_URL，回你 http 狀態與前 200 字原文
-const mAns = /^debug\s+答\s+(.+)$/.exec(rawText);
-if (mAns) {
-  const info = await requireMemberByUid(userId, replyToken);
-  if (!info) return;
-  const kw = mAns[1].trim();
-  const ans = await postJSON(ANSWER_URL, { q: kw, question: kw, email: info.email }, 5000);
-  const http = typeof ans?.http === "number" ? ans.http : 200;
-  const raw  = (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 200);
-  await replyOrPush(replyToken, userId, `ANSWER http=${http}\nraw=${raw}`);
-  return;
-}
-
-  
+  // 只收文字訊息
   if (ev?.type !== "message" || ev?.message?.type !== "text") return;
 
+  // 先把這些變數準備好，後面所有分支（含 debug）都會用到
   const replyToken = ev.replyToken;
-  const userId = ev.source?.userId || "";
-  const rawText = String(ev.message?.text || "").trim();
-  const q = normalize(rawText);
+  const userId     = ev.source?.userId || "";
+  const rawText    = String(ev.message?.text || "").trim();
+  const q          = normalize(rawText);
 
-  // 0) debug：環境檢查
+  /* ---------- debug 工具 ---------- */
+
+  // debug：環境檢查
   if (/^debug$/i.test(q)) {
     const msg = renderEnvDiag();
     await replyOrPush(replyToken, userId, msg);
     return;
   }
 
+  // debug schema：列出學員紀錄 DB 欄位名與型別
+  if (/^debug\s+schema$/i.test(q)) {
+    const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
+    const DB  = process.env.RECORD_DB_ID || "";
+    if (!KEY || !DB) { await replyOrPush(replyToken, userId, "紀錄DB或金鑰未設"); return; }
+    const j = await fetch(`https://api.notion.com/v1/databases/${DB}`, {
+      method: "GET",
+      headers: { "Authorization": `Bearer ${KEY}`, "Notion-Version": "2022-06-28" }
+    }).then(r=>r.json()).catch(()=> ({}));
+    const lines = ["📘 RECORD_DB schema"];
+    if (j?.properties) {
+      Object.keys(j.properties).forEach(k => lines.push(`• ${k} : ${j.properties[k].type}`));
+    } else {
+      lines.push("（讀不到 schema）");
+    }
+    await replyOrPush(replyToken, userId, lines.join("\n"));
+    return;
+  }
+
+  // debug 記錄：先寫一筆『症狀查詢』，再嘗試回填 AI回覆
+  if (/^debug\s+記錄$/i.test(q)) {
+    const info = await requireMemberByUid(userId, replyToken);
+    if (!info) return;
+    await writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: "debug 測試" });
+    try {
+      await updateLastSymptomRecordSafe({ email: info.email, userId, seg: "T6", tip: "這是debug回填", httpCode: "200" });
+      await replyOrPush(replyToken, userId, "✅ 記錄+回填 OK");
+    } catch {
+      await replyOrPush(replyToken, userId, "❌ 回填失敗，請用 debug schema 檢查欄位名/型別");
+    }
+    return;
+  }
+
+  // debug 答 XXX：直接打 ANSWER_URL 看 http 與原文
+  const mAns = /^debug\s+答\s+(.+)$/.exec(rawText);
+  if (mAns) {
+    const info = await requireMemberByUid(userId, replyToken);
+    if (!info) return;
+    const kw  = mAns[1].trim();
+    const ans = await postJSON(ANSWER_URL, { q: kw, question: kw, email: info.email }, 5000);
+    const http = typeof ans?.http === "number" ? ans.http : 200;
+    const raw  = (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 200);
+    await replyOrPush(replyToken, userId, `ANSWER http=${http}\nraw=${raw}`);
+    return;
+  }
+
+  /* ---------- 正常指令 ---------- */
+
   // 0.1) whoami：顯示目前使用者解析結果
   if (/^whoami$/i.test(q)) {
     const infoUid = await findMemberByUserId(userId);
-    const emailFromUid = infoUid?.email || "";
-    const g = GUARD_URL ? await postJSON(GUARD_URL, { uid: userId }, 2500) : {};
+    const emailFromUid   = infoUid?.email || "";
+    const g              = GUARD_URL ? await postJSON(GUARD_URL, { uid: userId }, 2500) : {};
     const emailFromGuard = (g?.ok && g?.email) ? String(g.email).trim().toLowerCase() : "";
 
     const lines = [
@@ -124,9 +126,9 @@ if (mAns) {
   }
 
   // 1) 綁定 email
-  const m = /^綁定\s*email\s+([^\s@]+@[^\s@]+\.[^\s@]+)$/i.exec(rawText.replace(/\u3000/g," "));
-  if (m) {
-    const email = m[1].toLowerCase();
+  const mBind = /^綁定\s*email\s+([^\s@]+@[^\s@]+\.[^\s@]+)$/i.exec(rawText.replace(/\u3000/g," "));
+  if (mBind) {
+    const email = mBind[1].toLowerCase();
     const ok = await bindEmailToNotion(email, userId);
     const msg = ok
       ? `✅ 已綁定成功：${email}\n之後可直接查詢症狀。`
@@ -135,7 +137,7 @@ if (mAns) {
     return;
   }
 
-  // 2) 我的狀態（LINE UserId 為主；找不到再嘗試 guard→email）
+  // 2) 我的狀態
   if (/^我的(狀態|帳號)$/.test(q)) {
     let info = await findMemberByUserId(userId);
     if (!info?.email && GUARD_URL) {
@@ -173,71 +175,53 @@ if (mAns) {
     return;
   }
 
- // 5) 其它：視為症狀查詢（強化版：帶診斷寫入 Notion）
-const info = await requireMemberByUid(userId, replyToken);
-if (!info) return;
+  // 5) 其它：症狀查詢
+  const info = await requireMemberByUid(userId, replyToken);
+  if (!info) return;
 
-// 先記錄查詢（不中斷）
-writeRecordSafe({
-  email: info.email, userId, category: "症狀查詢", content: rawText
-}).catch(() => {});
+  // 先記錄查詢
+  writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: rawText }).catch(()=>{});
 
-// 1) 關鍵字保底：同送 q / question；若 q 為空就退回 rawText
-const qPayload = q || rawText;
+  const qPayload = q || rawText;
+  const ans = await postJSON(ANSWER_URL, { q: qPayload, question: qPayload, email: info.email }, 5000);
 
-// 2) 呼叫答案 API（帶 email 做授權）
-const ans = await postJSON(
-  ANSWER_URL,
-  { q: qPayload, question: qPayload, email: info.email },
-  5000
-);
+  const results = Array.isArray(ans?.results) ? ans.results : [];
+  let seg = "—", tip = "—", mer = "—", replyMsg = "";
 
-// 3) 解析結果
-const results = Array.isArray(ans?.results) ? ans.results : [];
-let seg = "—", tip = "—", mer = "—", replyMsg = "";
+  if (results.length) {
+    const r = results[0] || {};
+    seg = r.segments || r.segment || "—";
+    tip = r.tips || r.summary || r.reply || "—";
+    mer = (Array.isArray(r.meridians) && r.meridians.length) ? r.meridians.join("、") : "—";
+    replyMsg = `🔎 查詢：「${qPayload}」\n對應脊椎分節：${seg}\n經絡與補充：${mer}\n教材重點：${tip}`;
+  } else if (ans?.answer?.臨床流程建議) {
+    seg = ans.answer.對應脊椎分節 || "—";
+    tip = ans.answer.臨床流程建議 || "—";
+    replyMsg = `🔎 查詢：「${qPayload}」\n建議分節：${seg}\n臨床流程：${tip}`;
+  } else {
+    const httpCode = typeof ans?.http === "number" ? String(ans.http) : "";
+    const diag = {
+      http: httpCode || "200",
+      error: ans?.error || "",
+      raw: (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 900)
+    };
+    updateLastSymptomRecordSafe({
+      email: info.email, userId, seg: "",
+      tip: `❗API 診斷：${JSON.stringify(diag)}`, httpCode: diag.http
+    }).catch(()=>{});
+    replyMsg = `找不到「${qPayload}」的教材內容。\n可改試：肩頸、頭暈、胸悶、胃痛、腰痠。`;
+  }
 
-if (results.length) {
-  const r = results[0] || {};
-  seg = r.segments || r.segment || "—";
-  tip = r.tips || r.summary || r.reply || "—";
-  mer = (Array.isArray(r.meridians) && r.meridians.length) ? r.meridians.join("、") : "—";
-  replyMsg = `🔎 查詢：「${qPayload}」\n對應脊椎分節：${seg}\n經絡與補充：${mer}\n教材重點：${tip}`;
-} else if (ans?.answer?.臨床流程建議) { // 舊版相容
-  seg = ans.answer.對應脊椎分節 || "—";
-  tip = ans.answer.臨床流程建議 || "—";
-  replyMsg = `🔎 查詢：「${qPayload}」\n建議分節：${seg}\n臨床流程：${tip}`;
-} else {
-  // 4) 失敗：把診斷資訊寫回上一筆記錄（方便你在 Notion 看到原始回應）
-  const httpCode = typeof ans?.http === "number" ? String(ans.http) : "";
-  const diag = {
-    http: httpCode || "200",
-    error: ans?.error || "",
-    // raw 最多截取 900 字，避免超過 Notion 欄位長度
-    raw: (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 900)
-  };
+  await replyOrPush(replyToken, userId, replyMsg);
 
-  updateLastSymptomRecordSafe({
-    email: info.email,
-    userId,
-    seg: "",
-    tip: `❗API 診斷：${JSON.stringify(diag)}`,
-    httpCode: diag.http
-  }).catch(() => {});
-
-  replyMsg = `找不到「${qPayload}」的教材內容。\n可改試：肩頸、頭暈、胸悶、胃痛、腰痠。`;
+  if (replyMsg && (seg !== "—" || tip !== "—")) {
+    updateLastSymptomRecordSafe({
+      email: info.email, userId, seg, tip,
+      httpCode: typeof ans?.http === "number" ? String(ans.http) : "200"
+    }).catch(()=>{});
+  }
 }
 
-// 5) 回覆使用者
-await replyOrPush(replyToken, userId, replyMsg);
-
-// 6) 成功時也把對應分節/AI 回覆補寫回記錄
-if (replyMsg && (seg !== "—" || tip !== "—")) {
-  updateLastSymptomRecordSafe({
-    email: info.email, userId, seg, tip,
-    httpCode: typeof ans?.http === "number" ? String(ans.http) : "200"
-  }).catch(() => {});
-}
-}
 
 /* --------------------------- 會員解析（UserId為主） --------------------------- */
 async function requireMemberByUid(userId, replyToken) {
