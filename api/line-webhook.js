@@ -1,8 +1,16 @@
 // api/line-webhook.js
 // 版本：LINE UserId 為主索引（Email 僅做顯示 / 備援）
+//
+// 需要的環境變數：
+// LINE_CHANNEL_ACCESS_TOKEN
+// NOTION_API_KEY 或 NOTION_TOKEN（擇一）
+// NOTION_MEMBER_DB_ID   （會員 DB）
+// RECORD_DB_ID          （學員紀錄 DB，可選）
+// BULAU_ANSWER_URL      （症狀查詢 API，例：https://bulau.vercel.app/api/answer）
+// （可選）BULAU_GUARD_URL 仍保留作為最末備援
 
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
-const GUARD_URL  = process.env.BULAU_GUARD_URL  || ""; // 可空
+const GUARD_URL  = process.env.BULAU_GUARD_URL  || "";
 
 /* --------------------------- HTTP 入口 --------------------------- */
 module.exports = async (req, res) => {
@@ -20,7 +28,7 @@ module.exports = async (req, res) => {
     if (!events.length) return res.status(200).json({ ok:true, note:"no_events" });
 
     for (const ev of events) {
-      await handleEvent(ev).catch(e => console.error("[event_error]", e?.stack || e?.message || e));
+      await handleEvent(ev).catch(e => console.error("[event_error]", e?.message || e));
     }
     return res.status(200).json({ ok:true });
   } catch (e) {
@@ -35,9 +43,11 @@ async function handleEvent(ev) {
   if (ev?.type !== "message" || ev?.message?.type !== "text") return;
 
   const replyToken = ev.replyToken;
-  const userId     = ev.source?.userId || "";
-  const rawText    = String(ev.message?.text || "").trim();
-  const q          = normalize(rawText);
+  const userId = ev.source?.userId || "";
+  const rawText = String(ev.message?.text || "").trim();
+  const q = normalize(rawText);
+
+  /* ===== 調試工具 ===== */
 
   // 0) debug：環境檢查
   if (/^debug$/i.test(q)) {
@@ -46,7 +56,26 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 0.1) debug schema：列出學員紀錄 DB 欄位名與型別（確認 AI回覆/對應脊椎分節/UserId）
+  // 0.1) whoami：顯示目前使用者解析結果
+  if (/^whoami$/i.test(q)) {
+    const infoUid = await findMemberByUserId(userId);
+    const emailFromUid = infoUid?.email || "";
+    const g = GUARD_URL ? await postJSON(GUARD_URL, { uid: userId }, 2500) : {};
+    const emailFromGuard = (g?.ok && g?.email) ? String(g.email).trim().toLowerCase() : "";
+
+    const lines = [
+      "🩺 whoami",
+      `• userId: ${userId}`,
+      `• Notion(email by uid): ${emailFromUid || "—"}`,
+      `• guard.email: ${emailFromGuard || "—"}`,
+      `• 使用欄位/型別：${infoUid?._uidProp || "—"} / ${infoUid?._uidType || "—"}`,
+      `• 最終 email：${emailFromUid || emailFromGuard || "（未找到）"}`
+    ];
+    await replyOrPush(replyToken, userId, lines.join("\n"));
+    return;
+  }
+
+  // 0.2) debug schema：列出學員紀錄 DB 欄位名與型別
   if (/^debug\s*schema$/i.test(q)) {
     const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
     const DB  = process.env.RECORD_DB_ID || "";
@@ -56,13 +85,16 @@ async function handleEvent(ev) {
       headers: { "Authorization": `Bearer ${KEY}`, "Notion-Version": "2022-06-28" }
     }).then(r=>r.json()).catch(()=> ({}));
     const lines = ["📘 RECORD_DB schema"];
-    if (j?.properties) Object.keys(j.properties).forEach(k => lines.push(`• ${k} : ${j.properties[k].type}`));
-    else lines.push("（讀不到 schema）");
+    if (j?.properties) {
+      Object.keys(j.properties).forEach(k => lines.push(`• ${k} : ${j.properties[k].type}`));
+    } else {
+      lines.push("（讀不到 schema）");
+    }
     await replyOrPush(replyToken, userId, lines.join("\n"));
     return;
   }
 
-  // 0.2) debug 記錄：先寫一筆『症狀查詢』，再嘗試回填
+  // 0.3) debug 記錄：先寫一筆『症狀查詢』，再回填 AI回覆測試
   if (/^debug\s*記錄$/i.test(q)) {
     const info = await requireMemberByUid(userId, replyToken);
     if (!info) return;
@@ -76,7 +108,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 0.3) debug 答 XXX：直接打 ANSWER_URL，回 http 與前 200 字原文
+  // 0.4) debug 答 XXX：直接打 ANSWER_URL，回 http 與前 200 字原文
   const mAns = /^debug\s*答\s+(.+)$/.exec(rawText);
   if (mAns) {
     const info = await requireMemberByUid(userId, replyToken);
@@ -89,23 +121,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 0.4) whoami：顯示目前使用者解析結果
-  if (/^whoami$/i.test(q)) {
-    const infoUid = await findMemberByUserId(userId);
-    const emailFromUid = infoUid?.email || "";
-    const g = GUARD_URL ? await postJSON(GUARD_URL, { uid: userId }, 2500) : {};
-    const emailFromGuard = (g?.ok && g?.email) ? String(g.email).trim().toLowerCase() : "";
-    const lines = [
-      "🩺 whoami",
-      `• userId: ${userId}`,
-      `• Notion(email by uid): ${emailFromUid || "—"}`,
-      `• guard.email: ${emailFromGuard || "—"}`,
-      `• 使用欄位/型別：${infoUid?._uidProp || "—"} / ${infoUid?._uidType || "—"}`,
-      `• 最終 email：${emailFromUid || emailFromGuard || "（未找到）"}`
-    ];
-    await replyOrPush(replyToken, userId, lines.join("\n"));
-    return;
-  }
+  /* ===== 正式功能 ===== */
 
   // 1) 綁定 email
   const m = /^綁定\s*email\s+([^\s@]+@[^\s@]+\.[^\s@]+)$/i.exec(rawText.replace(/\u3000/g," "));
@@ -157,34 +173,53 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 5) 其它：視為症狀查詢（強化版：帶診斷寫入 Notion）
+  // 5) 其它：視為症狀查詢（多筆呈現 + 診斷寫回 Notion）
   const info = await requireMemberByUid(userId, replyToken);
   if (!info) return;
 
   // 先記錄查詢（不中斷）
   writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: rawText }).catch(() => {});
 
-  // 關鍵字保底：同送 q / question；若 q 為空就退回 rawText
+  // 1) 關鍵字保底：同送 q / question；若 q 為空就退回 rawText
   const qPayload = q || rawText;
 
-  // 呼叫答案 API（帶 email 做授權）
+  // 2) 呼叫答案 API（帶 email 做授權）
   const ans = await postJSON(ANSWER_URL, { q: qPayload, question: qPayload, email: info.email }, 5000);
 
-  // 兼容新版 API 結構：items / results
-  const results = Array.isArray(ans?.results) ? ans.results
+  // 3) 解析與多筆呈現
+  const rawList = Array.isArray(ans?.results) ? ans.results
                 : Array.isArray(ans?.items)   ? ans.items
                 : [];
 
-  let seg = "—", tip = "—", mer = "—", replyMsg = "";
+  const MAX_ITEMS = 3;    // 顯示幾筆
+  const TIP_MAX   = 80;   // 教材重點顯示字數上限
+  const items     = rawList.slice(0, MAX_ITEMS);
 
-  if (results.length) {
-    const r = results[0] || {};
-    seg = r.segments || r.segment || r["對應脊椎分節"] || "—";
-    tip = r.tips || r.summary || r.reply || r["教材版回覆"] || r["臨床流程建議"] || "—";
-    mer = r["經絡與補充"] ||
-          (Array.isArray(r.meridians) && r.meridians.length ? r.meridians.join("、") : "—");
+  const clamp = (s, n) => { const t = String(s || ""); return t.length > n ? (t.slice(0, n) + "…") : t; };
+  const pick  = (obj, keys) => keys.map(k => obj?.[k]).find(v => !!v) || "";
+  const toMeridian = (r) => Array.isArray(r?.meridians) && r.meridians.length ? r.meridians.join("、") : (r?.["經絡與補充"] || "—");
+  const toSeg = (r) => r?.segments || r?.segment || r?.["對應脊椎分節"] || "—";
+  const toTip = (r) => clamp(pick(r, ["tips","summary","reply","教材版回覆","臨床流程建議"]), TIP_MAX);
+  const toTitle = (r) => pick(r, ["主題","問題","title","keyword"]);
 
-    replyMsg = `🔎 查詢：「${qPayload}」\n對應脊椎分節：${seg}\n經絡與補充：${mer}\n教材重點：${tip}`;
+  let seg = "—", tip = "—";
+  let replyMsg = "";
+
+  if (items.length) {
+    const lines = [];
+    lines.push(`🔎 查詢：「${qPayload}」`);
+    items.forEach((r, i) => {
+      const idx = i + 1;
+      const header = (toTitle(r) ? `#${idx} ${toTitle(r)}` : `#${idx}`);
+      const sSeg  = toSeg(r);
+      const sMer  = toMeridian(r);
+      const sTip  = toTip(r);
+      if (i === 0) { seg = sSeg; tip = sTip; }
+      lines.push(`${header}\n・對應脊椎分節：${sSeg}\n・經絡與補充：${sMer}\n・教材重點：${sTip}`);
+    });
+    const remain = rawList.length - items.length;
+    if (remain > 0) lines.push(`…還有 ${remain} 筆結果。可加上更精準的關鍵字再試（例如：「${qPayload} 姿勢」）。`);
+    replyMsg = lines.join("\n\n");
   } else if (ans?.answer?.臨床流程建議) { // 舊版相容
     seg = ans.answer.對應脊椎分節 || "—";
     tip = ans.answer.臨床流程建議 || "—";
@@ -197,17 +232,15 @@ async function handleEvent(ev) {
       raw: (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 900)
     };
     updateLastSymptomRecordSafe({
-      email: info.email, userId, seg: "",
-      tip: `❗API 診斷：${JSON.stringify(diag)}`,
-      httpCode: diag.http
+      email: info.email, userId, seg: "", tip: `❗API 診斷：${JSON.stringify(diag)}`, httpCode: diag.http
     }).catch(() => {});
     replyMsg = `找不到「${qPayload}」的教材內容。\n可改試：肩頸、頭暈、胸悶、胃痛、腰痠。`;
   }
 
-  // 回覆使用者
+  // 5) 回覆使用者
   await replyOrPush(replyToken, userId, replyMsg);
 
-  // 成功時把對應分節/AI 回覆補寫回記錄
+  // 6) 成功時把第 1 筆對應分節/AI 回覆補寫回記錄
   if (replyMsg && (seg !== "—" || tip !== "—")) {
     updateLastSymptomRecordSafe({
       email: info.email, userId, seg, tip,
@@ -235,7 +268,6 @@ async function requireMemberByUid(userId, replyToken) {
 }
 
 /* --------------------------- Notion：會員查詢/綁定 --------------------------- */
-// 讀 DB schema（回 {props, titleProp}）
 async function getDbProps(dbId) {
   const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
   if (!KEY || !dbId) return { props: null, titleProp: null };
@@ -247,7 +279,6 @@ async function getDbProps(dbId) {
   const titleProp = Object.keys(props).find(k => props[k]?.type === "title") || "名稱";
   return { props, titleProp };
 }
-// 依欄位型別組 equals 篩選
 function buildEqualsFilter(propName, propType, value) {
   if (propType === "title")     return { property: propName, title:     { equals: value } };
   if (propType === "rich_text") return { property: propName, rich_text: { equals: value } };
@@ -259,7 +290,6 @@ function buildEqualsFilter(propName, propType, value) {
     { property: propName, email:     { equals: value } }
   ];
 }
-// 主：用 LINE UserId 查會員（自動辨識欄位型別）
 async function findMemberByUserId(userId) {
   const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
   const DB  = process.env.NOTION_MEMBER_DB_ID || "";
@@ -277,8 +307,7 @@ async function findMemberByUserId(userId) {
 
   const primary = buildEqualsFilter(uidPropName, uidPropType, userId);
   const filters = Array.isArray(primary) ? primary : [primary];
-  // 備援：有人把 uid 放在 title
-  filters.push({ property: titleProp, title: { equals: userId } });
+  filters.push({ property: titleProp, title: { equals: userId } }); // 備援：有人把 uid 放在 title
 
   let page = null;
   for (const f of filters) {
@@ -304,7 +333,6 @@ async function findMemberByUserId(userId) {
                 (Array.isArray(p["等級"]?.multi_select) ? p["等級"].multi_select.map(x=>x.name).join(",") : "");
   return { email, statusName, expire, level, pageId: page.id, _uidProp: uidPropName, _uidType: uidPropType };
 }
-// 備援：用 Email 查會員（支援 title / Email[email] / Email[rich_text]）
 async function findMemberByEmail(email) {
   const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
   const DB  = process.env.NOTION_MEMBER_DB_ID || "";
@@ -343,7 +371,6 @@ async function findMemberByEmail(email) {
                 (Array.isArray(p["等級"]?.multi_select) ? p["等級"].multi_select.map(x=>x.name).join(",") : "");
   return { email, statusName, expire, level, pageId: page.id };
 }
-// 綁定：用 email 找該列 → 寫入 LINE UserId
 async function bindEmailToNotion(email, userId) {
   try {
     const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
@@ -397,13 +424,13 @@ async function writeRecordSafe({ email, userId, category, content }) {
     const payload = {
       parent: { database_id: DB },
       properties: {
-        "標題": { title: [{ text: { content: `${category}｜${new Date(nowISO).toLocaleString("zh-TW",{ timeZone:"Asia/Taipei" })}` } }] },
+        "標題":  { title: [{ text: { content: `${category}｜${new Date(nowISO).toLocaleString("zh-TW",{ timeZone:"Asia/Taipei" })}` } }] },
         "Email": { email },
         "UserId": { rich_text: [{ text: { content: userId } }] },
-        "類別": { select: { name: category } },
-        "內容": { rich_text: [{ text: { content } }] },
-        "日期": { date: { start: nowISO } },
-        "來源": { rich_text: [{ text: { content: "LINE" } }] }
+        "類別":  { select: { name: category } },
+        "內容":  { rich_text: [{ text: { content } }] },
+        "日期":  { date: { start: nowISO } },
+        "來源":  { rich_text: [{ text: { content: "LINE" } }] }
       }
     };
 
@@ -446,9 +473,9 @@ async function updateLastSymptomRecordSafe({ email, userId, seg, tip, httpCode }
 
     const patch = {
       properties: {
-        ...(seg ? { "對應脊椎分節": { rich_text: [{ text: { content: seg } }] } } : {}),
-        ...(tip ? { "AI回覆": { rich_text: [{ text: { content: String(tip).slice(0, 2000) } }] } } : {}),
-        ...(httpCode ? { "API回應碼": { rich_text: [{ text: { content: httpCode } }] } } : {}),
+        ...(seg      ? { "對應脊椎分節": { rich_text: [{ text: { content: seg } }] } } : {}),
+        ...(tip      ? { "AI回覆":     { rich_text: [{ text: { content: String(tip).slice(0, 2000) } }] } } : {}),
+        ...(httpCode ? { "API回應碼":   { rich_text: [{ text: { content: httpCode } }] } } : {}),
       }
     };
 
