@@ -85,18 +85,19 @@ async function handleEvent(ev) {
     return;
   }
 
-  // debug 答 XXX：直接打 ANSWER_URL 看 http 與原文
-  const mAns = /^debug(?:\s+)?答\s+(.+)$/i.exec(cmd);
-  if (mAns) {
-    const info = await requireMemberByUid(userId, replyToken);
-    if (!info) return;
-    const kw  = mAns[1].trim();
-    const ans = await postJSON(ANSWER_URL, { q: kw, question: kw, email: info.email }, 5000);
-    const http = typeof ans?.http === "number" ? ans.http : 200;
-    const raw  = (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 200);
-    await replyOrPush(replyToken, userId, `ANSWER http=${http}\nraw=${raw}`);
-    return;
-  }
+ // debug 答 XXX 或 debug XXX：直接打 ANSWER_URL 看 http 與原文
+const mAns = /^debug(?:\s*答)?\s+(.+)$/i.exec(cmd);
+if (mAns) {
+  const info = await requireMemberByUid(userId, replyToken);
+  if (!info) return;
+  const kw = mAns[1].trim();
+  const ans = await postJSON(ANSWER_URL, { q: kw, question: kw, email: info.email }, 5000);
+  const http = typeof ans?.http === "number" ? ans.http : 200;
+  const raw = (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 200);
+  await replyOrPush(replyToken, userId, `ANSWER http=${http}\nraw=${raw}`);
+  return;
+}
+
 
   /* ---------- 正常指令 ---------- */
 
