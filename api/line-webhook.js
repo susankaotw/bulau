@@ -40,6 +40,56 @@ exports.default = module.exports;
 
 /* --------------------------- 事件處理 --------------------------- */
 async function handleEvent(ev) {
+ 
+  // === 放在 handleEvent 最前面幾個 if 之前 ===
+// 1) debug schema：列出學員紀錄 DB 欄位名與型別（確認有沒有 AI回覆 / 對應脊椎分節 / UserId）
+if (/^debug\s+schema$/i.test(q)) {
+  const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
+  const DB  = process.env.RECORD_DB_ID || "";
+  if (!KEY || !DB) { await replyOrPush(replyToken, userId, "紀錄DB或金鑰未設"); return; }
+  const j = await fetch(`https://api.notion.com/v1/databases/${DB}`, {
+    method: "GET",
+    headers: { "Authorization": `Bearer ${KEY}`, "Notion-Version": "2022-06-28" }
+  }).then(r=>r.json()).catch(()=> ({}));
+  const lines = ["📘 RECORD_DB schema"];
+  if (j?.properties) {
+    Object.keys(j.properties).forEach(k => lines.push(`• ${k} : ${j.properties[k].type}`));
+  } else {
+    lines.push("（讀不到 schema）");
+  }
+  await replyOrPush(replyToken, userId, lines.join("\n"));
+  return;
+}
+
+// 2) debug 記錄：先寫一筆『症狀查詢』，再嘗試回填 AI回覆，看 patch 是否 200
+if (/^debug\s+記錄$/i.test(q)) {
+  const info = await requireMemberByUid(userId, replyToken);
+  if (!info) return;
+  await writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: "debug 測試" });
+  const ok = await (async () => {
+    try {
+      await updateLastSymptomRecordSafe({ email: info.email, userId, seg: "T6", tip: "這是debug回填", httpCode: "200" });
+      return true;
+    } catch { return false; }
+  })();
+  await replyOrPush(replyToken, userId, ok ? "✅ 記錄+回填 OK" : "❌ 回填失敗，請用 debug schema 檢查欄位名/型別");
+  return;
+}
+
+// 3) debug 答 XXX：直接打 ANSWER_URL，回你 http 狀態與前 200 字原文
+const mAns = /^debug\s+答\s+(.+)$/.exec(rawText);
+if (mAns) {
+  const info = await requireMemberByUid(userId, replyToken);
+  if (!info) return;
+  const kw = mAns[1].trim();
+  const ans = await postJSON(ANSWER_URL, { q: kw, question: kw, email: info.email }, 5000);
+  const http = typeof ans?.http === "number" ? ans.http : 200;
+  const raw  = (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 200);
+  await replyOrPush(replyToken, userId, `ANSWER http=${http}\nraw=${raw}`);
+  return;
+}
+
+  
   if (ev?.type !== "message" || ev?.message?.type !== "text") return;
 
   const replyToken = ev.replyToken;
