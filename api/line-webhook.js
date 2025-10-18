@@ -12,7 +12,7 @@ module.exports = async (req, res) => {
 
     let body = req.body;
     if (!body || typeof body === "string") {
-      let raw = typeof body === "string" ? body : await readRaw(req).catch(()=> "");
+      let raw = typeof body === "string" ? body : await readRaw(req).catch(()=>"");
       try { body = raw ? JSON.parse(raw) : {}; } catch { body = {}; }
     }
 
@@ -25,7 +25,6 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok:true });
   } catch (e) {
     console.error("[handler_crash]", e?.stack || e?.message || e);
-    // 仍回 200，避免 LINE 重送
     return res.status(200).json({ ok:false, note:"handled" });
   }
 };
@@ -33,27 +32,22 @@ exports.default = module.exports;
 
 /* --------------------------- 事件處理 --------------------------- */
 async function handleEvent(ev) {
-  // 只收文字訊息
   if (ev?.type !== "message" || ev?.message?.type !== "text") return;
 
-  // 先備好通用變數
   const replyToken = ev.replyToken;
   const userId     = ev.source?.userId || "";
   const rawText    = String(ev.message?.text || "").trim();
   const q          = normalize(rawText);
-  const cmd        = rawText.replace(/\u3000/g, ' ').trim(); // 保留空白用於 debug 指令
 
-  /* ---------- debug 工具 ---------- */
-
-  // debug：環境檢查
-  if (/^debug$/i.test(cmd)) {
+  // 0) debug：環境檢查
+  if (/^debug$/i.test(q)) {
     const msg = renderEnvDiag();
     await replyOrPush(replyToken, userId, msg);
     return;
   }
 
-  // debug schema：列出學員紀錄 DB 欄位名與型別
-  if (/^debug(\s+)?schema$/i.test(cmd)) {
+  // 0.1) debug schema：列出學員紀錄 DB 欄位名與型別（確認 AI回覆/對應脊椎分節/UserId）
+  if (/^debug\s*schema$/i.test(q)) {
     const KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
     const DB  = process.env.RECORD_DB_ID || "";
     if (!KEY || !DB) { await replyOrPush(replyToken, userId, "紀錄DB或金鑰未設"); return; }
@@ -62,17 +56,14 @@ async function handleEvent(ev) {
       headers: { "Authorization": `Bearer ${KEY}`, "Notion-Version": "2022-06-28" }
     }).then(r=>r.json()).catch(()=> ({}));
     const lines = ["📘 RECORD_DB schema"];
-    if (j?.properties) {
-      Object.keys(j.properties).forEach(k => lines.push(`• ${k} : ${j.properties[k].type}`));
-    } else {
-      lines.push("（讀不到 schema）");
-    }
+    if (j?.properties) Object.keys(j.properties).forEach(k => lines.push(`• ${k} : ${j.properties[k].type}`));
+    else lines.push("（讀不到 schema）");
     await replyOrPush(replyToken, userId, lines.join("\n"));
     return;
   }
 
-  // debug 記錄：先寫一筆『症狀查詢』，再嘗試回填 AI回覆
-  if (/^debug(\s+)?記錄$/i.test(cmd)) {
+  // 0.2) debug 記錄：先寫一筆『症狀查詢』，再嘗試回填
+  if (/^debug\s*記錄$/i.test(q)) {
     const info = await requireMemberByUid(userId, replyToken);
     if (!info) return;
     await writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: "debug 測試" });
@@ -80,34 +71,30 @@ async function handleEvent(ev) {
       await updateLastSymptomRecordSafe({ email: info.email, userId, seg: "T6", tip: "這是debug回填", httpCode: "200" });
       await replyOrPush(replyToken, userId, "✅ 記錄+回填 OK");
     } catch {
-      await replyOrPush(replyToken, userId, "❌ 回填失敗，請用 debug schema 檢查欄位名/型別");
+      await replyOrPush(replyToken, userId, "❌ 回填失敗，請用「debug schema」檢查欄位名/型別");
     }
     return;
   }
 
- // debug 答 XXX 或 debug XXX：直接打 ANSWER_URL 看 http 與原文
-const mAns = /^debug(?:\s*答)?\s+(.+)$/i.exec(cmd);
-if (mAns) {
-  const info = await requireMemberByUid(userId, replyToken);
-  if (!info) return;
-  const kw = mAns[1].trim();
-  const ans = await postJSON(ANSWER_URL, { q: kw, question: kw, email: info.email }, 5000);
-  const http = typeof ans?.http === "number" ? ans.http : 200;
-  const raw = (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 200);
-  await replyOrPush(replyToken, userId, `ANSWER http=${http}\nraw=${raw}`);
-  return;
-}
+  // 0.3) debug 答 XXX：直接打 ANSWER_URL，回 http 與前 200 字原文
+  const mAns = /^debug\s*答\s+(.+)$/.exec(rawText);
+  if (mAns) {
+    const info = await requireMemberByUid(userId, replyToken);
+    if (!info) return;
+    const kw = mAns[1].trim();
+    const ans = await postJSON(ANSWER_URL, { q: kw, question: kw, email: info.email }, 5000);
+    const http = typeof ans?.http === "number" ? ans.http : 200;
+    const raw  = (typeof ans?.raw === "string" ? ans.raw : JSON.stringify(ans || {})).slice(0, 200);
+    await replyOrPush(replyToken, userId, `ANSWER http=${http}\nraw=${raw}`);
+    return;
+  }
 
-
-  /* ---------- 正常指令 ---------- */
-
-  // whoami：顯示目前使用者解析結果
+  // 0.4) whoami：顯示目前使用者解析結果
   if (/^whoami$/i.test(q)) {
     const infoUid = await findMemberByUserId(userId);
-    const emailFromUid   = infoUid?.email || "";
-    const g              = GUARD_URL ? await postJSON(GUARD_URL, { uid: userId }, 2500) : {};
+    const emailFromUid = infoUid?.email || "";
+    const g = GUARD_URL ? await postJSON(GUARD_URL, { uid: userId }, 2500) : {};
     const emailFromGuard = (g?.ok && g?.email) ? String(g.email).trim().toLowerCase() : "";
-
     const lines = [
       "🩺 whoami",
       `• userId: ${userId}`,
@@ -120,10 +107,10 @@ if (mAns) {
     return;
   }
 
-  // 綁定 email
-  const mBind = /^綁定\s*email\s+([^\s@]+@[^\s@]+\.[^\s@]+)$/i.exec(rawText.replace(/\u3000/g," "));
-  if (mBind) {
-    const email = mBind[1].toLowerCase();
+  // 1) 綁定 email
+  const m = /^綁定\s*email\s+([^\s@]+@[^\s@]+\.[^\s@]+)$/i.exec(rawText.replace(/\u3000/g," "));
+  if (m) {
+    const email = m[1].toLowerCase();
     const ok = await bindEmailToNotion(email, userId);
     const msg = ok
       ? `✅ 已綁定成功：${email}\n之後可直接查詢症狀。`
@@ -132,7 +119,7 @@ if (mAns) {
     return;
   }
 
-  // 我的狀態 / 我的帳號（UserId 為主；找不到再嘗試 guard→email）
+  // 2) 我的狀態（LINE UserId 為主；找不到再嘗試 guard→email）
   if (/^我的(狀態|帳號)$/.test(q)) {
     let info = await findMemberByUserId(userId);
     if (!info?.email && GUARD_URL) {
@@ -148,7 +135,7 @@ if (mAns) {
     return;
   }
 
-  // 簽到
+  // 3) 簽到
   if (/^簽到/.test(q)) {
     const content = rawText.replace(/^簽到(\s*|：|:)?/i, "").trim();
     if (!content) { await replyOrPush(replyToken, userId, "簽到 內容不能空白喔～\n例：簽到 胸椎T6呼吸 10分鐘"); return; }
@@ -159,7 +146,7 @@ if (mAns) {
     return;
   }
 
-  // 心得
+  // 4) 心得
   if (/^心得/.test(q)) {
     const content = rawText.replace(/^心得(\s*|：|:)?/i, "").trim();
     if (!content) { await replyOrPush(replyToken, userId, "心得 內容不能空白喔～\n例：心得 今天練習C1放鬆"); return; }
@@ -170,32 +157,39 @@ if (mAns) {
     return;
   }
 
-  // 其它：視為症狀查詢（強化版：帶診斷寫入 Notion）
+  // 5) 其它：視為症狀查詢（強化版：帶診斷寫入 Notion）
   const info = await requireMemberByUid(userId, replyToken);
   if (!info) return;
 
-  // 先記錄查詢
-  writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: rawText }).catch(()=>{});
+  // 先記錄查詢（不中斷）
+  writeRecordSafe({ email: info.email, userId, category: "症狀查詢", content: rawText }).catch(() => {});
 
-  // 同送 q / question；若 q 為空就退回 rawText
+  // 關鍵字保底：同送 q / question；若 q 為空就退回 rawText
   const qPayload = q || rawText;
+
+  // 呼叫答案 API（帶 email 做授權）
   const ans = await postJSON(ANSWER_URL, { q: qPayload, question: qPayload, email: info.email }, 5000);
 
-  const results = Array.isArray(ans?.results) ? ans.results : [];
+  // 兼容新版 API 結構：items / results
+  const results = Array.isArray(ans?.results) ? ans.results
+                : Array.isArray(ans?.items)   ? ans.items
+                : [];
+
   let seg = "—", tip = "—", mer = "—", replyMsg = "";
 
   if (results.length) {
     const r = results[0] || {};
-    seg = r.segments || r.segment || "—";
-    tip = r.tips || r.summary || r.reply || "—";
-    mer = (Array.isArray(r.meridians) && r.meridians.length) ? r.meridians.join("、") : "—";
+    seg = r.segments || r.segment || r["對應脊椎分節"] || "—";
+    tip = r.tips || r.summary || r.reply || r["教材版回覆"] || r["臨床流程建議"] || "—";
+    mer = r["經絡與補充"] ||
+          (Array.isArray(r.meridians) && r.meridians.length ? r.meridians.join("、") : "—");
+
     replyMsg = `🔎 查詢：「${qPayload}」\n對應脊椎分節：${seg}\n經絡與補充：${mer}\n教材重點：${tip}`;
   } else if (ans?.answer?.臨床流程建議) { // 舊版相容
     seg = ans.answer.對應脊椎分節 || "—";
     tip = ans.answer.臨床流程建議 || "—";
     replyMsg = `🔎 查詢：「${qPayload}」\n建議分節：${seg}\n臨床流程：${tip}`;
   } else {
-    // 失敗：把診斷資訊寫回上一筆記錄（方便在 Notion 看到原始回應）
     const httpCode = typeof ans?.http === "number" ? String(ans.http) : "";
     const diag = {
       http: httpCode || "200",
@@ -204,19 +198,21 @@ if (mAns) {
     };
     updateLastSymptomRecordSafe({
       email: info.email, userId, seg: "",
-      tip: `❗API 診斷：${JSON.stringify(diag)}`, httpCode: diag.http
-    }).catch(()=>{});
+      tip: `❗API 診斷：${JSON.stringify(diag)}`,
+      httpCode: diag.http
+    }).catch(() => {});
     replyMsg = `找不到「${qPayload}」的教材內容。\n可改試：肩頸、頭暈、胸悶、胃痛、腰痠。`;
   }
 
+  // 回覆使用者
   await replyOrPush(replyToken, userId, replyMsg);
 
-  // 成功時把分節/AI回覆補寫回紀錄
+  // 成功時把對應分節/AI 回覆補寫回記錄
   if (replyMsg && (seg !== "—" || tip !== "—")) {
     updateLastSymptomRecordSafe({
       email: info.email, userId, seg, tip,
       httpCode: typeof ans?.http === "number" ? String(ans.http) : "200"
-    }).catch(()=>{});
+    }).catch(() => {});
   }
 }
 
@@ -468,47 +464,34 @@ async function updateLastSymptomRecordSafe({ email, userId, seg, tip, httpCode }
 }
 
 /* --------------------------- 工具 --------------------------- */
-function pageTitleText(prop) {
-  const arr = prop?.title || [];
+function pageTitleText(titlePropObj) {
+  const arr = titlePropObj?.title || [];
   return arr.map(b => b?.plain_text || "").join("").trim();
 }
-function normalize(s){ if(!s) return ""; let t=String(s).replace(/\u3000/g, " ").replace(/\s+/g, ""); if(t==="肩") t="肩頸"; return t; }
+function normalize(s){ if(!s) return ""; let t=String(s).replace(/\u3000/g," ").replace(/\s+/g,""); if(t==="肩") t="肩頸"; return t; }
 function readRaw(req){ return new Promise((resolve)=>{ let data=""; req.on("data",c=>data+=c); req.on("end",()=>resolve(data)); req.on("error",()=>resolve("")); }); }
-
 async function postJSON(url, body, timeoutMs=5000){
-  const ac = new AbortController(); const id = setTimeout(()=>ac.abort(), timeoutMs);
+  const ac=new AbortController(); const id=setTimeout(()=>ac.abort(), timeoutMs);
   try{
-    const r = await fetch(url,{
-      method:"POST",
-      headers:{ "Content-Type":"application/json", "Accept":"application/json" },
-      body: JSON.stringify(body),
-      signal: ac.signal
-    });
-    const txt = await r.text();
-    let json; try { json = JSON.parse(txt); } catch { json = { raw: txt }; }
-    if (!r.ok) json.http = r.status;
-    return json;
-  }catch(e){
-    console.error("[postJSON_error]", url, e?.message||e);
-    return { ok:false, error:"fetch_failed" };
-  }finally{
-    clearTimeout(id);
-  }
+    const r = await fetch(url,{ method:"POST", headers:{ "Content-Type":"application/json","Accept":"application/json" }, body:JSON.stringify(body), signal:ac.signal });
+    const txt=await r.text(); let json; try{ json=JSON.parse(txt);}catch{ json={raw:txt}; }
+    if(!r.ok) json.http = r.status; return json;
+  }catch(e){ console.error("[postJSON_error]", url, e?.message||e); return { ok:false, error:"fetch_failed" }; }
+  finally{ clearTimeout(id); }
 }
-
 async function replyOrPush(replyToken, userId, text){
   const ok = await replyText(replyToken, text);
-  if (!ok && userId) await pushText(userId, text);
+  if(!ok && userId) await pushText(userId, text);
 }
 async function replyText(replyToken, text){
   const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
   try{
     const r = await fetch("https://api.line.me/v2/bot/message/reply",{
       method:"POST",
-      headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${LINE_TOKEN}` },
+      headers:{ "Content-Type":"application/json","Authorization":`Bearer ${LINE_TOKEN}` },
       body: JSON.stringify({ replyToken, messages:[{ type:"text", text:String(text).slice(0,4900) }] })
     });
-    if (!r.ok) { const t = await r.text(); console.error("[replyText] http", r.status, t, "len=", LINE_TOKEN.length); return false; }
+    if(!r.ok){ const t=await r.text(); console.error("[replyText] http", r.status, t, "len=", LINE_TOKEN.length); return false; }
     return true;
   }catch(e){ console.error("[replyText_error]", e?.message||e); return false; }
 }
@@ -517,13 +500,12 @@ async function pushText(to, text){
   try{
     const r = await fetch("https://api.line.me/v2/bot/message/push",{
       method:"POST",
-      headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${LINE_TOKEN}` },
+      headers:{ "Content-Type":"application/json","Authorization":`Bearer ${LINE_TOKEN}` },
       body: JSON.stringify({ to, messages:[{ type:"text", text:String(text).slice(0,4900) }] })
     });
-  if (!r.ok) console.error("[pushText] http", r.status, await r.text(), "len=", LINE_TOKEN.length);
+    if(!r.ok) console.error("[pushText] http", r.status, await r.text(), "len=", LINE_TOKEN.length);
   }catch(e){ console.error("[pushText_error]", e?.message||e); }
 }
-
 function renderStatusCard(info){
   return [
     "📇 你的狀態",
