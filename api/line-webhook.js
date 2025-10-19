@@ -157,12 +157,11 @@ function formatSymptomsMessage(query, items, showN = 3) {
       "", "#1 症狀對應",
       "・問題：—",
       "・教材重點：—",
-      "",
       "・對應脊椎分節：—",
       "・臨床流程建議：—",
-      "",
       "・經絡與補充：—",
-      "・AI回覆：—"
+      "・AI回覆：—",
+      ""
     );
   } else {
     shown.forEach((it, idx) => {
@@ -176,12 +175,11 @@ function formatSymptomsMessage(query, items, showN = 3) {
         `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
         `・問題：${q}`,
         `・教材重點：${key1}`,
-        "",
         `・對應脊椎分節：${seg}`,
         `・臨床流程建議：${flow}`,
-        "",
         `・經絡與補充：${mer}`,
-        `・AI回覆：${ai}`
+        `・AI回覆：${ai}`,
+        ""
       );
     });
   }
@@ -201,12 +199,11 @@ function formatSymptomsAll(query, items, limit = 12) {
       "", "#1 症狀對應",
       "・問題：—",
       "・教材重點：—",
-      "",
       "・對應脊椎分節：—",
       "・臨床流程建議：—",
-      "",
       "・經絡與補充：—",
-      "・AI回覆：—"
+      "・AI回覆：—",
+        ""
     );
   } else {
     arr.forEach((it, idx) => {
@@ -220,12 +217,11 @@ function formatSymptomsAll(query, items, limit = 12) {
         `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
         `・問題：${q}`,
         `・教材重點：${key1}`,
-        "",
         `・對應脊椎分節：${seg}`,
         `・臨床流程建議：${flow}`,
-        "",
         `・經絡與補充：${mer}`,
-        `・AI回覆：${ai}`
+        `・AI回覆：${ai}`,
+        ""
       );
     });
   }
