@@ -123,27 +123,91 @@ async function handleEvent(ev) {
   await replyText(replyToken, msg);
 }
 
-/* ---------- 症狀回覆格式 ---------- */
-function formatSymptomsMessage(query, items) {
-  const maxN = 3;
-  const arr = (items || []).slice(0, maxN);
-  if (!arr.length) {
-    return `🔎 查詢：「${query}」\n\n#1 症狀對應\n・對應脊椎分節：—\n・經絡強補充：—\n・教材重點：—`;
-  }
+/* ---------- 症狀回覆格式（新版） ---------- */
+
+// 主卡片（最多 showN 筆）
+function formatSymptomsMessage(query, items, showN = 3) {
+  const arr = (items || []);
+  const shown = arr.slice(0, showN);
+  const moreCount = Math.max(0, arr.length - shown.length);
+
   const lines = [`🔎 查詢：「${query}」`];
-  arr.forEach((it, idx) => {
-    const seg = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
-    const mer = getField(it, ["meridians", "meridian", "經絡", "經絡強補充"]) || "—";
-    const tip = getField(it, ["tips", "summary", "reply", "教材重點", "臨床流程建議"]) || "—";
-    lines.push(
-      `\n#${idx+1} 症狀對應`,
-      `・對應脊椎分節：${seg}`,
-      `・經絡強補充：${mer}`,
-      `・教材重點：${tip}`
+  if (!shown.length) {
+    lines.push("", "#1 症狀對應",
+      "・問題：—",
+      "・教材重點：—",
+      "・對應脊椎分節：—",
+      "・臨床流程建議：—",
+      "・經絡與補充：—",
+      "・AI回覆：—"
     );
-  });
+  } else {
+    shown.forEach((it, idx) => {
+      const q    = getField(it, ["question", "問題", "query"]) || query;
+      const key1 = getField(it, ["教材重點", "tips", "summary", "reply"]) || "—";
+      const seg  = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
+      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "";
+      const mer  = getField(it, ["meridians", "meridian", "經絡", "經絡與補充", "經絡強補充"]) || "—";
+      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "";
+      lines.push(
+        `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
+        `・問題：${q}`,
+        `・教材重點：${key1}`,
+        `・對應脊椎分節：${seg}`,
+        `・臨床流程建議：${flow}`,
+        `・經絡與補充：${mer}`,
+        `・AI回覆：${ai}`
+      );
+    });
+  }
+
+  if (moreCount > 0) {
+    lines.push(
+      "",
+      `（還有 ${moreCount} 筆。建議重新查詢縮小範圍；或點下方「顯示全部」查看全部。）`
+    );
+  }
+
+  return { text: lines.join("\n"), moreCount };
+}
+
+// 顯示全部版本（最多 12 筆避免過長）
+function formatSymptomsAll(query, items, limit = 12) {
+  const arr = (items || []).slice(0, limit);
+  const lines = [`🔎 查詢：「${query}」`];
+  if (!arr.length) {
+    lines.push("", "#1 症狀對應",
+      "・問題：—",
+      "・教材重點：—",
+      "・對應脊椎分節：—",
+      "・臨床流程建議：—",
+      "・經絡與補充：—",
+      "・AI回覆：—"
+    );
+  } else {
+    arr.forEach((it, idx) => {
+      const q    = getField(it, ["question", "問題", "query"]) || query;
+      const key1 = getField(it, ["教材重點", "tips", "summary", "reply"]) || "—";
+      const seg  = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
+      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "";
+      const mer  = getField(it, ["meridians", "meridian", "經絡", "經絡與補充", "經絡強補充"]) || "—";
+      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "";
+      lines.push(
+        `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
+        `・問題：${q}`,
+        `・教材重點：${key1}`,
+        "",
+        `・對應脊椎分節：${seg}`,
+        `・臨床流程建議：${flow}`,
+        "",
+        `・經絡與補充：${mer}`,
+        `・AI回覆：${ai}`
+      );
+    });
+  }
   return lines.join("\n");
 }
+
 
 // 取欄位（多鍵容錯）
 function getField(obj, keys) {
