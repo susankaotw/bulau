@@ -1,6 +1,7 @@
 // api/line-webhook.js
 // 功能：綁定、查會員狀態、簽到、心得、症狀查詢（呼叫 ANSWER_URL）
-// 重要修正：Email 欄位同時支援 Notion「Email 型別 / Rich text / Title(標題) 型別」
+// 修正：中文指令判斷不用 \b，改用 (?:\\s|$)；加入中文字串正規化
+// 兼容：會員 Email 欄位可為 Email/RichText/Title
 
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
@@ -9,13 +10,19 @@ const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 
-const EMAIL_PROP = process.env.MEMBER_EMAIL_PROP || "Email";        // 你的 Email 欄名（在會員 DB 中是「標題 Title」）
+const EMAIL_PROP = process.env.MEMBER_EMAIL_PROP || "Email";        // 你的 Email 欄名（會員 DB 目前是 Title）
 const LINE_PROP  = process.env.MEMBER_LINE_PROP  || "LINE UserId";  // 你的 LINE 欄名
 
 const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
+// 將全形空白 -> 半形空白；統一多重空白為單一空白
+function normalizeText(input) {
+  return trim(String(input || "")
+    .replace(/\u3000/g, " ")      // 全形空白 → 半形
+    .replace(/\s+/g, " ")         // 多空白縮成一格
+  );
+}
 
-// 入口
 module.exports = async (req, res) => {
   try {
     if (req.method === "GET") {
@@ -37,20 +44,20 @@ module.exports = async (req, res) => {
   }
 };
 
-// 主流程
 async function handleEvent(ev) {
   if (ev.type !== "message" || ev.message?.type !== "text") return;
-  const text = trim(ev.message.text);
+  const raw = ev.message.text;
+  const text = normalizeText(raw);
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
 
-  // 指令
+  // help
   if (/^(help|幫助|\?|指令)$/i.test(text)) { await replyText(replyToken, helpText()); return; }
 
   // 綁定
   if (/^綁定\s+/i.test(text) || isEmail(text)) {
     let email = text;
-    if (/^綁定\s+/i.test(email)) email = trim(email.replace(/^綁定\s+/i, ""));
+    if (/^綁定\s+/i.test(email)) email = normalizeText(email.replace(/^綁定\s+/i, ""));
     if (!isEmail(email)) { await replyText(replyToken, "請輸入正確 Email，例如：綁定 test@example.com"); return; }
     const ok = await bindEmailToLine(userId, email);
     if (!ok) { await replyText(replyToken, "綁定失敗：找不到此 Email 的會員，或該帳號已綁定其他 LINE。"); return; }
@@ -70,25 +77,25 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 簽到
-  if (/^(簽到|打卡)\b/.test(text)) {
+  // 簽到（改用 (?:\s|$) 判斷；不使用 \b）
+  if (/^(簽到|打卡)(?:\s|$)/.test(text)) {
     const ensured = await ensureEmailForUser(userId);
     if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
-    const content = trim(text.replace(/^(簽到|打卡)\s*/,"")) || "簽到";
+    const content = normalizeText(text.replace(/^(簽到|打卡)(?:\s|$)/, "")) || "簽到";
     const pageId = await writeRecord({ email: ensured.email, userId, category:"簽到", content });
     await replyText(replyToken, `✅ 已簽到！\n內容：${content}\n(記錄ID: ${shortId(pageId)})`);
-    return;
+    return; // << 重要：避免落到症狀查詢
   }
 
-  // 心得
-  if (/^心得\b/.test(text)) {
+  // 心得（同樣改判斷式）
+  if (/^心得(?:\s|$)/.test(text)) {
     const ensured = await ensureEmailForUser(userId);
     if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
-    const content = trim(text.replace(/^心得\s*/,""));
+    const content = normalizeText(text.replace(/^心得(?:\s|$)/, ""));
     if (!content) { await replyText(replyToken, "請在「心得」後面接文字，例如：心得 今天的頸胸交界手感更清楚了"); return; }
     const pageId = await writeRecord({ email: ensured.email, userId, category:"心得", content });
     await replyText(replyToken, `📝 已寫入心得！\n${content}\n(記錄ID: ${shortId(pageId)})`);
-    return;
+    return; // << 重要
   }
 
   // 其餘 → 症狀查詢
@@ -116,7 +123,6 @@ async function ensureEmailForUser(userId) {
   return { email:"", justBound:false, hint:"尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com" };
 }
 
-// 以 LINE userId 反查 Email（支援 Email 欄位為 Email/RichText/Title 三種）
 async function getEmailByLineId(userId) {
   if (!MEMBER_DB || !userId) return "";
   const r = await notionQueryDatabase(MEMBER_DB, {
@@ -129,7 +135,6 @@ async function getEmailByLineId(userId) {
   return isEmail(email) ? email : "";
 }
 
-// 取完整會員資訊
 async function getMemberInfoByLineId(userId) {
   const r = await notionQueryDatabase(MEMBER_DB, {
     filter: { property: LINE_PROP, rich_text: { equals: userId } },
@@ -140,7 +145,6 @@ async function getMemberInfoByLineId(userId) {
   const page = r.results[0];
   const p = page.properties || {};
   const email = readPropEmail(p, EMAIL_PROP);
-
   const status = p["狀態"]?.select?.name || "";
   const level  = p["等級"]?.select?.name || "";
   const expire = p["有效日期"]?.date?.start || "";
@@ -149,23 +153,21 @@ async function getMemberInfoByLineId(userId) {
   return { email, status, level, expire, lineBind };
 }
 
-// 首綁：以 Email 找會員 → 寫入 LINE userId（支援 Email/RichText/Title 查詢）
 async function bindEmailToLine(userId, email) {
   if (!MEMBER_DB || !userId || !isEmail(email)) return false;
-
-  // 1) 用 Email 型別
+  // Email 型別
   let r = await notionQueryDatabase(MEMBER_DB, {
     filter: { property: EMAIL_PROP, email: { equals: email } },
     page_size: 1
   });
-  // 2) 後備：Rich text
+  // Rich text
   if (!r?.results?.length) {
     r = await notionQueryDatabase(MEMBER_DB, {
       filter: { property: EMAIL_PROP, rich_text: { equals: email } },
       page_size: 1
     });
   }
-  // 3) 再後備：Title（你的情況大多是這個）
+  // Title
   if (!r?.results?.length) {
     r = await notionQueryDatabase(MEMBER_DB, {
       filter: { property: EMAIL_PROP, title: { equals: email } },
@@ -199,7 +201,6 @@ async function notionQueryDatabase(dbId, body) {
   });
   try { return await r.json(); } catch { return {}; }
 }
-
 async function notionPatchPage(pageId, data) {
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
@@ -213,7 +214,6 @@ async function notionPatchPage(pageId, data) {
   if (!r.ok) console.error("[notionPatchPage]", r.status, await safeText(r));
   return r.ok;
 }
-
 async function notionCreatePage(dbId, properties) {
   const r = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
@@ -236,7 +236,7 @@ async function writeRecord({ email, userId, category, content }) {
 
   const props = {
     "標題":  { title: [{ text: { content: `${category}｜${nowTW}` } }] },
-    "Email": { email }, // 這裡的記錄 DB「Email」欄請用 Notion Email 型別
+    "Email": { email }, // 記錄 DB 的 Email 欄請用 Notion Email 型別
     "UserId": { rich_text: [{ text: { content: userId } }] },
     "類別":  { select: { name: category } },
     "內容":  { rich_text: [{ text: { content } }] },
@@ -249,7 +249,6 @@ async function writeRecord({ email, userId, category, content }) {
   if (!ok) console.error("[writeRecord] create failed", json);
   return pageId;
 }
-
 async function patchRecordById(pageId, { seg, tip, httpCode }) {
   if (!pageId) return;
   const props = {};
@@ -273,7 +272,6 @@ function helpText() {
 }
 function fmtDate(iso) { try { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; } catch { return iso; } }
 function shortId(id) { return id ? id.replace(/-/g,"").slice(0,8) : ""; }
-
 async function replyText(replyToken, text) {
   if (!LINE_TOKEN) { console.warn("[replyText] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
@@ -293,16 +291,13 @@ async function postJSON(url, body, timeoutMs = 15000) {
 }
 async function safeText(res) { try { return await res.text(); } catch { return ""; } }
 
-/* ---------- Email 欄位讀取共用（Email/RichText/Title 三合一） ---------- */
+/* ---------- Email 欄位讀取：Email/RichText/Title 三合一 ---------- */
 function readPropEmail(props, key) {
   if (!props || !key || !props[key]) return "";
-  // 1) Notion Email 型別
   const e1 = props[key]?.email || "";
   if (e1 && isEmail(e1)) return e1.trim();
-  // 2) Rich text
   const e2 = (props[key]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
   if (e2 && isEmail(e2)) return e2;
-  // 3) Title（你的狀況多半是這個）
   const e3 = (props[key]?.title || []).map(t => t?.plain_text || "").join("").trim();
   if (e3 && isEmail(e3)) return e3;
   return "";
