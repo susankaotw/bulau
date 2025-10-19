@@ -136,8 +136,10 @@ function formatSymptomsMessage(query, items, showN = 3) {
     lines.push("", "#1 症狀對應",
       "・問題：—",
       "・教材重點：—",
+      "",
       "・對應脊椎分節：—",
       "・臨床流程建議：—",
+      "",
       "・經絡與補充：—",
       "・AI回覆：—"
     );
@@ -153,8 +155,10 @@ function formatSymptomsMessage(query, items, showN = 3) {
         `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
         `・問題：${q}`,
         `・教材重點：${key1}`,
+        "",
         `・對應脊椎分節：${seg}`,
         `・臨床流程建議：${flow}`,
+        "",
         `・經絡與補充：${mer}`,
         `・AI回覆：${ai}`
       );
@@ -179,8 +183,10 @@ function formatSymptomsAll(query, items, limit = 12) {
     lines.push("", "#1 症狀對應",
       "・問題：—",
       "・教材重點：—",
+      "",
       "・對應脊椎分節：—",
       "・臨床流程建議：—",
+      "",
       "・經絡與補充：—",
       "・AI回覆：—"
     );
@@ -207,6 +213,7 @@ function formatSymptomsAll(query, items, limit = 12) {
   }
   return lines.join("\n");
 }
+
 
 
 // 取欄位（多鍵容錯）
