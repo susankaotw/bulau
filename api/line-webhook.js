@@ -1,7 +1,7 @@
 // api/line-webhook.js
 // 功能：綁定、查會員狀態、簽到、心得、症狀查詢（呼叫 ANSWER_URL）
-// 修正：中文指令不用 \b；支援 Email 欄為 Email/RichText/Title；
-// 新增：症狀查詢回覆格式化為多段列點（與你截圖一致）
+// 修正：[object Object] 問題（replyText 傳字串）；>3 筆顯示 Quick Reply「顯示全部 xxx」
+// 顯示：症狀查詢每筆區塊 => 問題/教材重點/對應分節/臨床流程建議/經絡與補充/AI回覆
 
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
@@ -10,17 +10,13 @@ const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 
-const EMAIL_PROP = process.env.MEMBER_EMAIL_PROP || "Email";        // 你的 Email 欄名（會員 DB 現為 Title）
-const LINE_PROP  = process.env.MEMBER_LINE_PROP  || "LINE UserId";  // 你的 LINE 欄名
+const EMAIL_PROP = process.env.MEMBER_EMAIL_PROP || "Email";
+const LINE_PROP  = process.env.MEMBER_LINE_PROP  || "LINE UserId";
 
 const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
-function normalizeText(input) {
-  return trim(String(input || "")
-    .replace(/\u3000/g, " ") // 全形空白 → 半形
-    .replace(/\s+/g, " ")    // 多空白縮一格
-  );
-}
+const normalizeText = (input) =>
+  trim(String(input || "").replace(/\u3000/g, " ").replace(/\s+/g, " "));
 
 module.exports = async (req, res) => {
   try {
@@ -33,9 +29,7 @@ module.exports = async (req, res) => {
     if (req.method !== "POST") return res.status(405).json({ ok:false, reason:"method_not_allowed" });
 
     const events = Array.isArray(req.body?.events) ? req.body.events : [];
-    for (const ev of events) {
-      try { await handleEvent(ev); } catch (e) { console.error("[event_error]", e); }
-    }
+    for (const ev of events) { try { await handleEvent(ev); } catch (e) { console.error("[event_error]", e); } }
     return res.status(200).json({ ok:true });
   } catch (e) {
     console.error("[handler_crash]", e);
@@ -50,6 +44,19 @@ async function handleEvent(ev) {
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
 
+  // Quick Reply：「顯示全部 xxx」
+  const showAllMatch = text.match(/^顯示(全部|更多)(?:\s|$)(.+)/);
+  if (showAllMatch) {
+    const query = normalizeText(showAllMatch[2] || "");
+    const ensured = await ensureEmailForUser(userId);
+    if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
+    const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: ensured.email }, 15000);
+    const list = coerceList(ans);
+    const msgAll = formatSymptomsAll(query, list, 12);
+    await replyText(replyToken, msgAll);
+    return;
+  }
+
   // help
   if (/^(help|幫助|\?|指令)$/i.test(text)) { await replyText(replyToken, helpText()); return; }
 
@@ -59,8 +66,10 @@ async function handleEvent(ev) {
     if (/^綁定\s+/i.test(email)) email = normalizeText(email.replace(/^綁定\s+/i, ""));
     if (!isEmail(email)) { await replyText(replyToken, "請輸入正確 Email，例如：綁定 test@example.com"); return; }
     const ok = await bindEmailToLine(userId, email);
-    if (!ok) { await replyText(replyToken, "綁定失敗：找不到此 Email 的會員，或該帳號已綁定其他 LINE。"); return; }
-    await replyText(replyToken, `✅ 已綁定 Email：${email}\n之後可直接輸入關鍵字查詢、簽到或寫心得。`);
+    await replyText(replyToken, ok
+      ? `✅ 已綁定 Email：${email}\n之後可直接輸入關鍵字查詢、簽到或寫心得。`
+      : "綁定失敗：找不到此 Email 的會員，或該帳號已綁定其他 LINE。"
+    );
     return;
   }
 
@@ -97,19 +106,18 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 其餘 → 症狀查詢（格式化輸出）
+  // 其餘 → 症狀查詢（卡片樣式 + Quick Reply）
   const ensured = await ensureEmailForUser(userId);
   if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
 
   const category = "症狀查詢";
   const pageId = await writeRecord({ email: ensured.email, userId, category, content:text });
 
-  const ans = await postJSON(ANSWER_URL, { q:text, question:text, email: ensured.email }, 15000);
-  const list = Array.isArray(ans?.results) ? ans.results
-             : Array.isArray(ans?.items)   ? ans.items : [];
+  const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: ensured.email }, 15000);
+  const list = coerceList(ans);
 
-  // 解析第一筆做回填（維持原有欄位）
-  const first = list[0] || ans?.answer || {};
+  // 回填第一筆
+  const first    = list[0] || ans?.answer || {};
   const segFirst = getField(first, ["segments", "segment", "對應脊椎分節"]);
   const tipFirst = getField(first, ["tips", "summary", "reply", "教材重點", "臨床流程建議"]);
   await patchRecordById(pageId, {
@@ -118,22 +126,35 @@ async function handleEvent(ev) {
     httpCode: String(ans?.http || 200)
   });
 
-  // 以清晰卡片格式輸出（最多 3 筆）
-  const msg = formatSymptomsMessage(text, list);
-  await replyText(replyToken, msg);
+  const out = formatSymptomsMessage(text, list, 3);
+  if (out.moreCount > 0) {
+    await replyTextQR(replyToken, out.text, [
+      { label: "顯示全部", text: `顯示全部 ${text}` }
+    ]);
+  } else {
+    await replyText(replyToken, out.text);   // <== 修正點：傳字串
+  }
 }
 
-/* ---------- 症狀回覆格式（新版） ---------- */
+/* ===== 症狀回覆格式 ===== */
+
+// 標準化 list
+function coerceList(ans) {
+  if (Array.isArray(ans?.results)) return ans.results;
+  if (Array.isArray(ans?.items))   return ans.items;
+  return ans?.answer ? [ans.answer] : [];
+}
 
 // 主卡片（最多 showN 筆）
 function formatSymptomsMessage(query, items, showN = 3) {
-  const arr = (items || []);
+  const arr = items || [];
   const shown = arr.slice(0, showN);
   const moreCount = Math.max(0, arr.length - shown.length);
 
   const lines = [`🔎 查詢：「${query}」`];
   if (!shown.length) {
-    lines.push("", "#1 症狀對應",
+    lines.push(
+      "", "#1 症狀對應",
       "・問題：—",
       "・教材重點：—",
       "",
@@ -148,9 +169,9 @@ function formatSymptomsMessage(query, items, showN = 3) {
       const q    = getField(it, ["question", "問題", "query"]) || query;
       const key1 = getField(it, ["教材重點", "tips", "summary", "reply"]) || "—";
       const seg  = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
-      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "";
+      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "—";
       const mer  = getField(it, ["meridians", "meridian", "經絡", "經絡與補充", "經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "";
+      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "—";
       lines.push(
         `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
         `・問題：${q}`,
@@ -166,21 +187,18 @@ function formatSymptomsMessage(query, items, showN = 3) {
   }
 
   if (moreCount > 0) {
-    lines.push(
-      "",
-      `（還有 ${moreCount} 筆。建議重新查詢縮小範圍；或點下方「顯示全部」查看全部。）`
-    );
+    lines.push("", `（還有 ${moreCount} 筆。建議重新查詢縮小範圍；或點下方「顯示全部」查看全部。）`);
   }
-
   return { text: lines.join("\n"), moreCount };
 }
 
-// 顯示全部版本（最多 12 筆避免過長）
+// 顯示全部（最多 12 筆）
 function formatSymptomsAll(query, items, limit = 12) {
   const arr = (items || []).slice(0, limit);
   const lines = [`🔎 查詢：「${query}」`];
   if (!arr.length) {
-    lines.push("", "#1 症狀對應",
+    lines.push(
+      "", "#1 症狀對應",
       "・問題：—",
       "・教材重點：—",
       "",
@@ -195,9 +213,9 @@ function formatSymptomsAll(query, items, limit = 12) {
       const q    = getField(it, ["question", "問題", "query"]) || query;
       const key1 = getField(it, ["教材重點", "tips", "summary", "reply"]) || "—";
       const seg  = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
-      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "";
+      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "—";
       const mer  = getField(it, ["meridians", "meridian", "經絡", "經絡與補充", "經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "";
+      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "—";
       lines.push(
         `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
         `・問題：${q}`,
@@ -214,18 +232,14 @@ function formatSymptomsAll(query, items, limit = 12) {
   return lines.join("\n");
 }
 
-
-
-// 取欄位（多鍵容錯）
+// 多鍵容錯取值
 function getField(obj, keys) {
   if (!obj) return "";
-  for (const k of keys) {
-    if (obj[k]) return String(obj[k]);
-  }
+  for (const k of keys) if (obj[k]) return String(obj[k]);
   return "";
 }
 
-/* ---------- 綁定 / 會員查詢 ---------- */
+/* ===== 綁定 / 會員查詢 ===== */
 async function ensureEmailForUser(userId) {
   const email = await getEmailByLineId(userId);
   if (email) return { email, justBound:false, hint:"" };
@@ -258,12 +272,12 @@ async function getMemberInfoByLineId(userId) {
   const level  = p["等級"]?.select?.name || "";
   const expire = p["有效日期"]?.date?.start || "";
   const lineBind = (p[LINE_PROP]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
-
   return { email, status, level, expire, lineBind };
 }
 
 async function bindEmailToLine(userId, email) {
   if (!MEMBER_DB || !userId || !isEmail(email)) return false;
+
   // Email 型別
   let r = await notionQueryDatabase(MEMBER_DB, {
     filter: { property: EMAIL_PROP, email: { equals: email } },
@@ -289,15 +303,14 @@ async function bindEmailToLine(userId, email) {
   const pageId = page.id;
   const props  = page.properties || {};
   const existing = (props[LINE_PROP]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
-
-  if (existing) return existing === userId; // 已綁：同人=成功；不同=拒絕
+  if (existing) return existing === userId;
 
   return await notionPatchPage(pageId, {
     properties: { [LINE_PROP]: { rich_text: [{ text: { content: userId } }] } }
   });
 }
 
-/* ---------- Notion 共用 ---------- */
+/* ===== Notion 共用 ===== */
 async function notionQueryDatabase(dbId, body) {
   const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
     method: "POST",
@@ -338,21 +351,20 @@ async function notionCreatePage(dbId, properties) {
   return { ok: r.ok, json: j, status: r.status };
 }
 
-/* ---------- 記錄 DB ---------- */
+/* ===== 記錄 DB ===== */
 async function writeRecord({ email, userId, category, content }) {
   const nowISO = new Date().toISOString();
   const nowTW  = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
 
   const props = {
     "標題":  { title: [{ text: { content: `${category}｜${nowTW}` } }] },
-    "Email": { email }, // 記錄 DB 的 Email 欄請用 Notion Email 型別
+    "Email": { email }, // 記錄 DB 的 Email 欄建議為 Notion Email 型別
     "UserId": { rich_text: [{ text: { content: userId } }] },
     "類別":  { select: { name: category } },
     "內容":  { rich_text: [{ text: { content } }] },
     "日期":  { date: { start: nowISO } },
     "來源":  { rich_text: [{ text: { content: "LINE" } }] }
   };
-
   const { ok, json } = await notionCreatePage(RECORD_DB, props);
   const pageId = json?.id || "";
   if (!ok) console.error("[writeRecord] create failed", json);
@@ -368,19 +380,7 @@ async function patchRecordById(pageId, { seg, tip, httpCode }) {
   if (!ok) console.error("[patchRecordById] failed");
 }
 
-/* ---------- 工具 ---------- */
-function helpText() {
-  return [
-    "可用指令：",
-    "• 綁定 your@email.com   → 綁定 LINE 與會員",
-    "• 我的狀態 / 狀態        → 查詢會員狀態/等級/有效日期",
-    "• 簽到 [內容]            → 今日簽到（可附註）",
-    "• 心得 你的心得……        → 紀錄學習/調理心得",
-    "• 直接輸入症狀關鍵字      → 例如：肩頸痠痛、頭暈、胸悶、胃痛、腰痠",
-  ].join("\n");
-}
-function fmtDate(iso) { try { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; } catch { return iso; } }
-function shortId(id) { return id ? id.replace(/-/g,"").slice(0,8) : ""; }
+/* ===== LINE 回覆 ===== */
 async function replyText(replyToken, text) {
   if (!LINE_TOKEN) { console.warn("[replyText] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
@@ -390,6 +390,28 @@ async function replyText(replyToken, text) {
   });
   if (!r.ok) console.error("[replyText]", r.status, await safeText(r));
 }
+async function replyTextQR(replyToken, text, quickList = []) {
+  if (!LINE_TOKEN) { console.warn("[replyTextQR] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
+  const items = (quickList || []).map(q => ({
+    type: "action",
+    action: { type: "message", label: q.label, text: q.text }
+  })).slice(0, 12);
+  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${LINE_TOKEN}` },
+    body: JSON.stringify({
+      replyToken,
+      messages: [{
+        type: "text",
+        text: String(text || "").slice(0, 4900),
+        quickReply: items.length ? { items } : undefined
+      }]
+    })
+  });
+  if (!r.ok) console.error("[replyTextQR]", r.status, await safeText(r));
+}
+
+/* ===== 其他工具 ===== */
 async function postJSON(url, body, timeoutMs = 15000) {
   const ac = new AbortController(); const id = setTimeout(() => ac.abort(), timeoutMs);
   try {
@@ -400,7 +422,7 @@ async function postJSON(url, body, timeoutMs = 15000) {
 }
 async function safeText(res) { try { return await res.text(); } catch { return ""; } }
 
-/* ---------- Email 欄位讀取（Email/RichText/Title 三合一） ---------- */
+// Email 欄位讀取：Email/RichText/Title 三合一
 function readPropEmail(props, key) {
   if (!props || !key || !props[key]) return "";
   const e1 = props[key]?.email || "";
@@ -412,7 +434,7 @@ function readPropEmail(props, key) {
   return "";
 }
 
-/* ---------- 健康檢查 / 最小寫入 ---------- */
+/* ===== 健康檢查 / 最小寫入 ===== */
 async function doHealthCheck() {
   const hasNotionKey = Boolean(NOTION_KEY);
   const hasMemberDB  = Boolean(MEMBER_DB);
