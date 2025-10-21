@@ -1,13 +1,13 @@
 // api/line-webhook.js
-// 功能：綁定 Email、查會員狀態、簽到、心得、症狀/主題查詢（ANSWER_URL 或 直接查 QA_DB）
-// 修正：教材重點優先抓「教材版回覆」；新增「主題 查詢」：主題 基礎理論 / 直接輸入 基礎理論
+// 功能：綁定 Email、查會員狀態、簽到、心得、症狀/主題查詢
+// 修正：主題查詢強化 & 自測工具（GET: action=test-topic、LINE: debug 主題 xxx）
 
 /* ====== 環境變數 ====== */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
-const RECORD_DB  = process.env.RECORD_DB_ID || "";             // 學員紀錄 DB
+const RECORD_DB  = process.env.RECORD_DB_ID || "";             // 紀錄 DB
 const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";      // 會員 DB
-const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || ""; // QA 資料庫（新增）
+const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || ""; // ★ QA DB
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 
@@ -31,7 +31,7 @@ const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
 const normalizeText = (input) =>
   trim(String(input || "").replace(/\u3000/g, " ").replace(/\s+/g, " "));
-const KNOWN_TOPICS = ["基礎理論","症狀對應","上肢","腰背","下肢"]; // 需要可自行擴充
+const KNOWN_TOPICS = ["基礎理論","症狀對應","上肢","腰背","下肢"]; // 可自行擴充
 
 /* ====== 入口 ====== */
 module.exports = async (req, res) => {
@@ -40,6 +40,14 @@ module.exports = async (req, res) => {
       const action = String(req.query?.action || "");
       if (action === "health")     return res.status(200).json(await doHealthCheck());
       if (action === "test-write") return res.status(200).json(await testMinimalWrite());
+      if (action === "test-topic") {
+        const topic = normalizeText(req.query?.topic || "基礎理論");
+        const items = await queryQaByTopic(topic, 5);
+        return res.status(200).json({
+          ok: true, topic, count: items.length,
+          sample: items.map(x => ({ 問題: x.問題, 分節: x.對應脊椎分節, 教材: (x.教材版回覆 || x.教材重點).slice(0,50) }))
+        });
+      }
       return res.status(200).send("OK");
     }
     if (req.method !== "POST") return res.status(405).json({ ok:false, reason:"method_not_allowed" });
@@ -61,6 +69,21 @@ async function handleEvent(ev) {
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
 
+  // debug 主題 xxx  → 直接測試 QA_DB 主題查詢
+  const mDebugTopic = /^debug\s*主題\s+(.+)$/i.exec(text);
+  if (mDebugTopic) {
+    const topic = normalizeText(mDebugTopic[1]);
+    const items = await queryQaByTopic(topic, 5);
+    const lines = [
+      `🔧 debug 主題：「${topic}」`,
+      `QA_DB 設定：${QA_DB_ID ? "✅" : "❌（未設定 NOTION_QA_DB_ID）"}`,
+      `筆數：${items.length}`,
+      ...(items.slice(0,3).map((x,i)=>`#${i+1} ${x.問題}｜${x.對應脊椎分節}｜${(x.教材版回覆 || x.教材重點 || "—").slice(0,30)}`))
+    ];
+    await replyText(replyToken, lines.join("\n"));
+    return;
+  }
+
   // Quick Reply：「顯示全部 xxx」
   const showAllMatch = text.match(/^顯示(全部|更多)(?:\s|$)(.+)/);
   if (showAllMatch) {
@@ -68,7 +91,7 @@ async function handleEvent(ev) {
     const ensured = await ensureEmailForUser(userId);
     if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
 
-    // 支援：顯示全部 主題 基礎理論
+    // 顯示全部 主題 基礎理論
     const mTopic = query.match(/^主題(?:\s|:|：)?\s*(.+)$/);
     if (mTopic || isTopic(query)) {
       const topic = mTopic ? normalizeText(mTopic[1]) : query;
@@ -134,7 +157,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  // ===== 主題查詢（兩種觸發：1) 主題 xxx 2) 直接輸入為已知主題） =====
+  // ===== 主題查詢（1) 主題 xxx 2) 直接輸入為已知主題） =====
   const mTopic = text.match(/^主題(?:\s|:|：)?\s*(.+)$/);
   if (mTopic || isTopic(text)) {
     const ensured = await ensureEmailForUser(userId);
@@ -144,7 +167,6 @@ async function handleEvent(ev) {
     const pageId = await writeRecord({ email: ensured.email, userId, category:"症狀查詢", content:`主題 ${topic}` });
     const items  = await queryQaByTopic(topic, 10);
 
-    // 回填第一筆
     const first    = items[0] || {};
     const segFirst = getField(first, ["對應脊椎分節"]);
     const tipFirst = getField(first, ["教材版回覆","教材重點","臨床流程建議"]);
@@ -159,7 +181,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  // ===== 其餘 → 症狀關鍵字查詢（呼叫 Answer API） =====
+  // ===== 其餘 → 症狀關鍵字查詢 =====
   const ensured = await ensureEmailForUser(userId);
   if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
 
@@ -169,7 +191,6 @@ async function handleEvent(ev) {
   const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: ensured.email }, 15000);
   const list = coerceList(ans);
 
-  // 回填第一筆
   const first    = list[0] || ans?.answer || {};
   const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
   const tipFirst = getField(first, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "";
@@ -189,11 +210,11 @@ function isTopic(s){ return KNOWN_TOPICS.includes(normalizeText(s)); }
 async function queryQaByTopic(topic, limit = 10){
   if (!QA_DB_ID || !NOTION_KEY) return [];
   const body = {
-    database_id: QA_DB_ID,
     filter: { property: "主題", select: { equals: topic } },
     sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
     page_size: limit
   };
+  // 注意：這邊用 URL 帶 DB_ID，body 不再帶 database_id，避免奇怪行為
   const r = await notionQueryDatabase(QA_DB_ID, body);
   const pages = Array.isArray(r?.results) ? r.results : [];
   return pages.map(pageToItem);
@@ -364,7 +385,7 @@ async function notionQueryDatabase(dbId, body) {
 async function notionPatchPage(pageId, data) {
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${NOTION_KEY}", "Notion-Version": "${NOTION_VER}", "Content-Type": "application/json" },
     body: JSON.stringify(data || {})
   });
   if (!r.ok) console.error("[notionPatchPage]", r.status, await safeText(r));
@@ -514,9 +535,10 @@ function helpText() {
     "• 狀態 / 我的狀態",
     "• 簽到 內容…",
     "• 心得 內容…",
-    "• 直接輸入症狀關鍵字（例：肩頸、頭暈、胸悶）",
     "• 主題 基礎理論（或直接輸入：基礎理論）",
-    "• 顯示全部 關鍵字 / 顯示全部 主題 基礎理論",
+    "• 顯示全部 主題 基礎理論",
+    "• 直接輸入症狀關鍵字（例：肩頸、頭暈、胸悶）",
+    "• debug 主題 基礎理論（測試）",
   ].join("\n");
 }
 function fmtDate(iso) { try { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; } catch { return iso; } }
