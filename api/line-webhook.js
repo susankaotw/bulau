@@ -1,21 +1,20 @@
 // api/line-webhook.js
 // 功能：綁定 Email、查會員狀態、簽到、心得、症狀查詢（呼叫 ANSWER_URL）
-// 注意：已固定寫入 Notion 紀錄 DB 欄位：AI回覆、對應脊椎分節（只在存在時更新）
-// 修正：移除不存在的 API回應碼 欄位；避免 400 validation_error
+// 修正：教材重點一律取 DB 欄位「教材版回覆」，沒有才退回其它欄位
 
 /* ====== 環境變數 ====== */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
-const RECORD_DB  = process.env.RECORD_DB_ID || "";               // 不老會員紀錄DB
-const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";        // 不老會員資料庫
+const RECORD_DB  = process.env.RECORD_DB_ID || "";
+const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 
-/* 會員 DB 欄位（照你實際命名） */
-const MEMBER_EMAIL_PROP = "Email";           // 會員DB的「Email」（你的實際是 Title，我有同時支援 Email/RichText/Title）
-const MEMBER_LINE_PROP  = "LINE UserId";     // 會員DB的「LINE UserId」
+/* 會員 DB 欄位 */
+const MEMBER_EMAIL_PROP = "Email";
+const MEMBER_LINE_PROP  = "LINE UserId";
 
-/* 紀錄 DB 欄位（照你截圖命名） */
+/* 紀錄 DB 欄位 */
 const REC_TITLE  = "標題";
 const REC_EMAIL  = "Email";
 const REC_UID    = "UserId";
@@ -122,7 +121,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 其餘 → 症狀查詢（卡片樣式 + Quick Reply）
+  // 其餘 → 症狀查詢
   const ensured = await ensureEmailForUser(userId);
   if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
 
@@ -132,10 +131,10 @@ async function handleEvent(ev) {
   const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: ensured.email }, 15000);
   const list = coerceList(ans);
 
-  // 回填第一筆（只寫存在欄位）
+  // 回填第一筆（AI回覆：教材版回覆；對應脊椎分節：segments/segment/對應脊椎分節）
   const first    = list[0] || ans?.answer || {};
-  const segFirst = getField(first, ["segments", "segment", "對應脊椎分節"]) || "";
-  const tipFirst = getField(first, ["tips", "summary", "reply", "教材重點", "臨床流程建議"]) || "";
+  const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
+  const tipFirst = getField(first, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
   const out = formatSymptomsMessage(text, list, 3);
@@ -176,11 +175,11 @@ function formatSymptomsMessage(query, items, showN = 3) {
   } else {
     shown.forEach((it, idx) => {
       const q    = getField(it, ["question", "問題", "query"]) || query;
-      const key1 = getField(it, ["教材重點", "tips", "summary", "reply", "臨床流程建議"]) || "—";
-      const seg  = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
-      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "—";
-      const mer  = getField(it, ["meridians", "meridian", "經絡", "經絡與補充", "經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "—";
+      const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—"; // ★ 先取【教材版回覆】
+      const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
+      const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
+      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
+      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
       lines.push(
         `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
         `・問題：${q}`,
@@ -218,11 +217,11 @@ function formatSymptomsAll(query, items, limit = 12) {
   } else {
     arr.forEach((it, idx) => {
       const q    = getField(it, ["question", "問題", "query"]) || query;
-      const key1 = getField(it, ["教材重點", "tips", "summary", "reply", "臨床流程建議"]) || "—";
-      const seg  = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
-      const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "—";
-      const mer  = getField(it, ["meridians", "meridian", "經絡", "經絡與補充", "經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆", "ai_reply", "ai", "answer"]) || "—";
+      const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—"; // ★ 先取【教材版回覆】
+      const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
+      const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
+      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
+      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
       lines.push(
         `${idx === 0 ? "\n" : ""}#${idx+1} 症狀對應`,
         `・問題：${q}`,
@@ -252,7 +251,6 @@ async function ensureEmailForUser(userId) {
   return { email:"", justBound:false, hint:"尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com" };
 }
 
-// 以 LINE UserId 查 Email（支援 Email/RichText/Title）
 async function getEmailByLineId(userId) {
   if (!MEMBER_DB || !userId) return "";
   const r = await notionQueryDatabase(MEMBER_DB, {
@@ -281,7 +279,6 @@ async function getMemberInfoByLineId(userId) {
   return { email, status, level, expire, lineBind };
 }
 
-// 綁定：用 Email 找會員 → 寫入 LINE UserId
 async function bindEmailToLine(userId, email) {
   if (!MEMBER_DB || !userId || !isEmail(email)) return false;
 
@@ -365,7 +362,7 @@ async function writeRecord({ email, userId, category, content }) {
 
   const props = {
     [REC_TITLE]: { title: [{ text: { content: `${category}｜${nowTW}` } }] },
-    [REC_EMAIL]: { email },  // 建議此欄為 Notion Email 型別
+    [REC_EMAIL]: { email },
     [REC_UID]:   { rich_text: [{ text: { content: userId } }] },
     [REC_CATE]:  { select: { name: category } },
     [REC_BODY]:  { rich_text: [{ text: { content } }] },
@@ -379,31 +376,24 @@ async function writeRecord({ email, userId, category, content }) {
   return pageId;
 }
 
-// 只更新「AI回覆」「對應脊椎分節」且欄位存在才寫入
 async function patchRecordById(pageId, { seg, tip }) {
   if (!pageId) return;
-
-  // 讀取頁面，確認欄位是否存在與型別
   const page = await notionGetPage(pageId);
   const propsNow = page?.properties || {};
   const outProps = {};
-
   if (typeof seg !== "undefined" && propsNow[REC_SEG]) {
     outProps[REC_SEG] = buildPropValueByType(propsNow[REC_SEG], seg ?? "");
   }
   if (typeof tip !== "undefined" && propsNow[REC_AI]) {
     outProps[REC_AI] = buildPropValueByType(propsNow[REC_AI], tip ?? "");
   }
-
-  // 沒有匹配欄位就跳過，避免 400
   const keys = Object.keys(outProps);
   if (!keys.length) { console.warn("[patchRecordById] no matched properties to update"); return; }
-
   const ok = await notionPatchPage(pageId, { properties: outProps });
   if (!ok) console.error("[patchRecordById] failed", outProps);
 }
 
-/* ====== Notion 辅助：讀頁面、型別適配 ====== */
+/* ====== Notion 輔助 ====== */
 async function notionGetPage(pageId) {
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "GET",
