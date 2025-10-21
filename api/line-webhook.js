@@ -7,7 +7,7 @@ const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
 const RECORD_DB  = process.env.RECORD_DB_ID || "";             // 紀錄 DB
 const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";      // 會員 DB
-const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || ""; // ★ QA DB
+const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || ""; // QA 主資料庫
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 
@@ -50,6 +50,7 @@ module.exports = async (req, res) => {
       }
       return res.status(200).send("OK");
     }
+
     if (req.method !== "POST") return res.status(405).json({ ok:false, reason:"method_not_allowed" });
 
     const events = Array.isArray(req.body?.events) ? req.body.events : [];
@@ -69,7 +70,7 @@ async function handleEvent(ev) {
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
 
-  // debug 主題 xxx  → 直接測試 QA_DB 主題查詢
+  // debug 主題 xxx
   const mDebugTopic = /^debug\s*主題\s+(.+)$/i.exec(text);
   if (mDebugTopic) {
     const topic = normalizeText(mDebugTopic[1]);
@@ -192,6 +193,7 @@ async function handleEvent(ev) {
   const list = coerceList(ans);
 
   const first    = list[0] || ans?.answer || {};
+  the
   const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
   const tipFirst = getField(first, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
@@ -214,7 +216,6 @@ async function queryQaByTopic(topic, limit = 10){
     sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
     page_size: limit
   };
-  // 注意：這邊用 URL 帶 DB_ID，body 不再帶 database_id，避免奇怪行為
   const r = await notionQueryDatabase(QA_DB_ID, body);
   const pages = Array.isArray(r?.results) ? r.results : [];
   return pages.map(pageToItem);
@@ -377,15 +378,24 @@ async function bindEmailToLine(userId, email) {
 async function notionQueryDatabase(dbId, body) {
   const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
     method: "POST",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" },
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(body || {})
   });
   try { return await r.json(); } catch { return {}; }
 }
 async function notionPatchPage(pageId, data) {
+  // ★ 修正這裡原本的壞字串（500 的主因）
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}", "Notion-Version": "${NOTION_VER}", "Content-Type": "application/json" },
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(data || {})
   });
   if (!r.ok) console.error("[notionPatchPage]", r.status, await safeText(r));
@@ -394,7 +404,11 @@ async function notionPatchPage(pageId, data) {
 async function notionCreatePage(dbId, properties) {
   const r = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" },
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify({ parent: { database_id: dbId }, properties })
   });
   const j = await r.json().catch(() => ({}));
@@ -441,7 +455,11 @@ async function patchRecordById(pageId, { seg, tip }) {
 async function notionGetPage(pageId) {
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "GET",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" }
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    }
   });
   try { return await r.json(); } catch { return {}; }
 }
