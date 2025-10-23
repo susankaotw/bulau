@@ -89,10 +89,11 @@ if (mShowAll) {
   // 其餘 → 症狀（ANSWER_URL）
   const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
   const list = coerceList(ans);
-  if (!list.length) { await replyText(replyToken, notFoundMessage(query)); return; }
-  const msgAll = formatSymptomsAll(query, list, 50);
-  await replyText(replyToken, msgAll);
+ // 查不到任何教材
+if (!list.length) {
+  await replyText(replyToken, notFoundMessage(text));
   return;
+}
 }
 
 
@@ -191,25 +192,32 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
   const pageId = await writeRecord({ email: gate.email, userId, category:"症狀查詢", content:`主題 ${topic}` });
+const items = Array.isArray(itemsOptional) ? itemsOptional : await queryQaByTopic(topic, 10);
 
-  const items = Array.isArray(itemsOptional) ? itemsOptional : await queryQaByTopic(topic, 10);
+// 查不到任何教材
+if (!items.length) {
+  await replyText(replyToken, notFoundMessage(topic));
+  return;
+}
 
-  const first    = items[0] || {};
-  const segFirst = getField(first, ["對應脊椎分節"]) || "";
-  const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
-  await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
+// 取第一筆做回填
+const first    = items[0] || {};
+const segFirst = getField(first, ["對應脊椎分節"]) || "";
+const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
+await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
-  const outList = items;
-  const flex = itemsToFlexCarousel(outList, `主題：${topic}`);
-  const okFlex = await replyFlex(replyToken, flex);
-  if (!okFlex) {
-    const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
-    if (out.moreCount > 0) {
-      await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
-    } else {
-      await replyText(replyToken, out.text);
-    }
+const flex = itemsToFlexCarousel(items, `主題：${topic}`);
+const okFlex = await replyFlex(replyToken, flex);
+if (!okFlex) {
+  const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
+  if (out.moreCount > 0) {
+    await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
+  } else {
+    await replyText(replyToken, out.text);
   }
+}
+
+ 
 }
 
 /* ====== QA_DB 查詢 ====== */
@@ -250,20 +258,11 @@ function formatSymptomsMessage(query, items, showN=3){
   const arr = items || [];
   const shown = arr.slice(0, showN);
   const moreCount = Math.max(0, arr.length - shown.length);
-  const lines = [`🔎 查詢：「${query}」`];
 
-  if (!shown.length){
-    lines.push(
-      "", "#1 症狀對應",
-      "・問題：—",
-      "・教材重點：—",
-      "・對應脊椎分節：—",
-      "・臨床流程建議：—",
-      "・經絡與補充：—",
-      "・AI回覆：—",
-      ""
-    );
-  } else {
+  if (!shown.length) {
+    return { text: notFoundMessage(query), moreCount: 0 };
+  }
+  else {
     shown.forEach((it, idx) => {
       const q    = getField(it, ["question","問題","query"]) || query;
       const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
@@ -289,21 +288,12 @@ function formatSymptomsMessage(query, items, showN=3){
 }
 
 function formatSymptomsAll(query, items, limit=50){
+  
   const arr = (items || []).slice(0, limit);
-  const lines = [`🔎 查詢：「${query}」`];
-
   if (!arr.length){
-    lines.push(
-      "", "#1 症狀對應",
-      "・問題：—",
-      "・教材重點：—",
-      "・對應脊椎分節：—",
-      "・臨床流程建議：—",
-      "・經絡與補充：—",
-      "・AI回覆：—",
-      ""
-    );
-  } else {
+    return notFoundMessage(query);
+  }
+  else {
     arr.forEach((it, idx) => {
       const q    = getField(it, ["question","問題","query"]) || query;
       const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
