@@ -46,6 +46,7 @@ const REC_SEG   = "對應脊椎分節";
 const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
 const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g," ").replace(/\s+/g," "));
+function notFoundMessage(q){ return `找不到[${String(q || "").trim()}]的教材內容`; }
 
 /* ====== 入口 ====== */
 module.exports = async (req, res) => {
@@ -67,35 +68,36 @@ async function handleEvent(ev){
   const text = normalizeText(ev.message.text);
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
+  console.log("[handleEvent] text=", text);
 
-// Quick Reply：「顯示全部 主題 XXX」/「顯示全部 XXX(症狀)」
-const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
-if (mShowAll) {
-  const query = normalizeText(mShowAll[2] || "");
-  const gate = await ensureMemberAllowed(userId);
-  if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+  // Quick Reply：「顯示全部 主題 XXX」/「顯示全部 XXX(症狀)」
+  const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
+  if (mShowAll) {
+    const query = normalizeText(mShowAll[2] || "");
+    const gate = await ensureMemberAllowed(userId);
+    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
-  // 「顯示全部 主題 XXX」
-  const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
-  if (mTopic) {
-    const topic = normalizeText(mTopic[1]);
-    const list = await queryQaByTopic(topic, 50);
-    if (!list.length) { await replyText(replyToken, notFoundMessage(topic)); return; }
-    const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
-    await replyText(replyToken, msg);
+    // 「顯示全部 主題 XXX」
+    const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
+    if (mTopic) {
+      const topic = normalizeText(mTopic[1]);
+      const list = await queryQaByTopic(topic, 50);
+      console.log("[showAll.topic] topic=", topic, "len=", list.length);
+      if (!list.length) { await replyText(replyToken, notFoundMessage(topic)); return; }
+      const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
+      await replyText(replyToken, msg);
+      return;
+    }
+
+    // 其餘 → 症狀（ANSWER_URL）
+    const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
+    const list = coerceList(ans);
+    console.log("[showAll.symptom] query=", query, "len=", list.length);
+    if (!list.length) { await replyText(replyToken, notFoundMessage(query)); return; }
+    const msgAll = formatSymptomsAll(query, list, 50);
+    await replyText(replyToken, msgAll);
     return;
   }
-
-  // 其餘 → 症狀（ANSWER_URL）
-  const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
-  const list = coerceList(ans);
- // 查不到任何教材
-if (!list.length) {
-  await replyText(replyToken, notFoundMessage(text));
-  return;
-}
-}
-
 
   // help
   if (/^(help|幫助|\?|指令)$/i.test(text)) { await replyText(replyToken, helpText()); return; }
@@ -152,6 +154,7 @@ if (!list.length) {
     await doTopicSearch(replyToken, userId, topic);
     return;
   }
+  // 直接字串嘗試當「主題」查
   if (QA_DB_ID) {
     const itemsAsTopic = await queryQaByTopic(text, 10);
     if (itemsAsTopic.length > 0) {
@@ -167,6 +170,13 @@ if (!list.length) {
   const pageId = await writeRecord({ email: gate.email, userId, category:"症狀查詢", content:text });
   const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: gate.email }, 15000);
   const list = coerceList(ans);
+  console.log("[symptom] text=", text, "len=", list.length);
+
+  // 沒結果 → 回固定句
+  if (!list.length) {
+    await replyText(replyToken, notFoundMessage(text));
+    return;
+  }
 
   const first    = list[0] || ans?.answer || {};
   const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
@@ -175,6 +185,7 @@ if (!list.length) {
 
   const flex = itemsToFlexCarousel(list, `查詢：${text}`);
   const okFlex = await replyFlex(replyToken, flex);
+  console.log("[replyFlex.ok?]", okFlex);
   if (!okFlex) {
     const out = formatSymptomsMessage(text, list, 3);
     if (out.moreCount > 0) {
@@ -192,32 +203,31 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
   const pageId = await writeRecord({ email: gate.email, userId, category:"症狀查詢", content:`主題 ${topic}` });
-const items = Array.isArray(itemsOptional) ? itemsOptional : await queryQaByTopic(topic, 10);
 
-// 查不到任何教材
-if (!items.length) {
-  await replyText(replyToken, notFoundMessage(topic));
-  return;
-}
+  const items = Array.isArray(itemsOptional) ? itemsOptional : await queryQaByTopic(topic, 10);
 
-// 取第一筆做回填
-const first    = items[0] || {};
-const segFirst = getField(first, ["對應脊椎分節"]) || "";
-const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
-await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
-
-const flex = itemsToFlexCarousel(items, `主題：${topic}`);
-const okFlex = await replyFlex(replyToken, flex);
-if (!okFlex) {
-  const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
-  if (out.moreCount > 0) {
-    await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
-  } else {
-    await replyText(replyToken, out.text);
+  // 查不到任何教材
+  if (!items.length) {
+    await replyText(replyToken, notFoundMessage(topic));
+    return;
   }
-}
 
- 
+  // 取第一筆做回填
+  const first    = items[0] || {};
+  const segFirst = getField(first, ["對應脊椎分節"]) || "";
+  const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
+  await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
+
+  const flex = itemsToFlexCarousel(items, `主題：${topic}`);
+  const okFlex = await replyFlex(replyToken, flex);
+  if (!okFlex) {
+    const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
+    if (out.moreCount > 0) {
+      await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
+    } else {
+      await replyText(replyToken, out.text);
+    }
+  }
 }
 
 /* ====== QA_DB 查詢 ====== */
@@ -262,57 +272,56 @@ function formatSymptomsMessage(query, items, showN=3){
   if (!shown.length) {
     return { text: notFoundMessage(query), moreCount: 0 };
   }
-  else {
-    shown.forEach((it, idx) => {
-      const q    = getField(it, ["question","問題","query"]) || query;
-      const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
-      const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-      const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
-      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
-      lines.push(
-        `${idx===0 ? "\n" : ""}#${idx+1} 症狀對應`,
-        `・問題：${q}`,
-        `・教材重點：${key1}`,
-        `・對應脊椎分節：${seg}`,
-        `・臨床流程建議：${flow}`,
-        `・經絡與補充：${mer}`,
-        `・AI回覆：${ai}`,
-        ""
-      );
-    });
-  }
+
+  const lines = [`🔎 查詢：「${query}」`];
+  shown.forEach((it, idx) => {
+    const q    = getField(it, ["question","問題","query"]) || query;
+    const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
+    const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
+    const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
+    const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
+    const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
+    lines.push(
+      `${idx===0 ? "\n" : ""}#${idx+1} 症狀對應`,
+      `・問題：${q}`,
+      `・教材重點：${key1}`,
+      `・對應脊椎分節：${seg}`,
+      `・臨床流程建議：${flow}`,
+      `・經絡與補充：${mer}`,
+      `・AI回覆：${ai}`,
+      ""
+    );
+  });
 
   if (moreCount > 0) lines.push("", `（還有 ${moreCount} 筆。你可輸入「顯示全部 …」查看全部。）`);
   return { text: lines.join("\n"), moreCount };
 }
 
 function formatSymptomsAll(query, items, limit=50){
-  
   const arr = (items || []).slice(0, limit);
   if (!arr.length){
     return notFoundMessage(query);
   }
-  else {
-    arr.forEach((it, idx) => {
-      const q    = getField(it, ["question","問題","query"]) || query;
-      const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
-      const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-      const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
-      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
-      lines.push(
-        `${idx===0 ? "\n" : ""}#${idx+1} 症狀對應`,
-        `・問題：${q}`,
-        `・教材重點：${key1}`,
-        `・對應脊椎分節：${seg}`,
-        `・臨床流程建議：${flow}`,
-        `・經絡與補充：${mer}`,
-        `・AI回覆：${ai}`,
-        ""
-      );
-    });
-  }
+
+  const lines = [`🔎 查詢：「${query}」`];
+  arr.forEach((it, idx) => {
+    const q    = getField(it, ["question","問題","query"]) || query;
+    const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
+    const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
+    const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
+    const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
+    const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
+    lines.push(
+      `${idx===0 ? "\n" : ""}#${idx+1} 症狀對應`,
+      `・問題：${q}`,
+      `・教材重點：${key1}`,
+      `・對應脊椎分節：${seg}`,
+      `・臨床流程建議：${flow}`,
+      `・經絡與補充：${mer}`,
+      `・AI回覆：${ai}`,
+      ""
+    );
+  });
   return lines.join("\n");
 }
 
@@ -369,7 +378,7 @@ async function bindEmailToLine(userId, email){
   return await notionPatchPage(pageId, { properties: { [MEMBER_LINE_PROP]: { rich_text: [{ text: { content: userId } }] } } });
 }
 
-/* ====== Notion 共用（修正 Authorization/引號） ====== */
+/* ====== Notion 共用 ====== */
 async function notionQueryDatabase(dbId, body){
   const r = await fetch("https://api.notion.com/v1/databases/" + dbId + "/query", {
     method: "POST",
@@ -486,40 +495,6 @@ async function replyTextQR(replyToken, text, quickList=[]){
   if (!r.ok) console.error("[replyTextQR]", r.status, await safeText(r));
 }
 
-/* ====== HTTP / 其他 ====== */
-async function postJSON(url, body, timeoutMs=15000){
-  const ac = new AbortController(); const id = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json", "Accept":"application/json" }, body:JSON.stringify(body||{}), signal:ac.signal });
-    const txt = await r.text(); let json; try { json = JSON.parse(txt); } catch { json = { raw: txt }; } json.http = r.status; return json;
-  } catch (e) { console.error("[postJSON]", e?.message || e); return { ok:false, error:e?.message || "fetch_failed" }; }
-  finally { clearTimeout(id); }
-}
-async function safeText(res){ try { return await res.text(); } catch { return ""; } }
-function readPropEmail(props, key){
-  if (!props || !key || !props[key]) return "";
-  const e1 = props[key]?.email || ""; if (e1 && isEmail(e1)) return e1.trim();
-  const e2 = (props[key]?.rich_text || []).map(t => t?.plain_text || "").join("").trim(); if (e2 && isEmail(e2)) return e2;
-  const e3 = (props[key]?.title || []).map(t => t?.plain_text || "").join("").trim(); if (e3 && isEmail(e3)) return e3;
-  return "";
-}
-
-/* ====== 說明 ====== */
-function helpText(){
-  return [
-    "可用指令：",
-    "• 綁定 your@email.com",
-    "• 狀態 / 我的狀態",
-    "• 簽到 [內容]",
-    "• 心得 你的心得……",
-    "• 主題 基礎理論  （或直接輸入：基礎理論）",
-    "• 顯示全部 主題 基礎理論",
-    "• 直接輸入症狀關鍵字（例：肩頸、頭暈、胸悶）"
-  ].join("\n");
-}
-function fmtDate(iso){ try{ const d=new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}catch{return iso;} }
-function shortId(id){ return id ? id.replace(/-/g,"").slice(0,8) : ""; }
-
 // ===== LINE Flex 回覆（表格樣式） =====
 async function replyFlex(replyToken, flex) {
   if (!LINE_TOKEN) { console.warn("[replyFlex] missing LINE_CHANNEL_ACCESS_TOKEN"); return false; }
@@ -581,4 +556,36 @@ function itemsToFlexCarousel(items, titlePrefix="查詢") {
   return { type: "carousel", contents: bubbles };
 }
 
-function notFoundMessage(q){ return `找不到[${String(q || "").trim()}]的教材內容`; }
+/* ====== HTTP / 其他 ====== */
+async function postJSON(url, body, timeoutMs=15000){
+  const ac = new AbortController(); const id = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json", "Accept":"application/json" }, body:JSON.stringify(body||{}), signal:ac.signal });
+    const txt = await r.text(); let json; try { json = JSON.parse(txt); } catch { json = { raw: txt }; } json.http = r.status; return json;
+  } catch (e) { console.error("[postJSON]", e?.message || e); return { ok:false, error:e?.message || "fetch_failed" }; }
+  finally { clearTimeout(id); }
+}
+async function safeText(res){ try { return await res.text(); } catch { return ""; } }
+function readPropEmail(props, key){
+  if (!props || !key || !props[key]) return "";
+  const e1 = props[key]?.email || ""; if (e1 && isEmail(e1)) return e1.trim();
+  const e2 = (props[key]?.rich_text || []).map(t => t?.plain_text || "").join("").trim(); if (e2 && isEmail(e2)) return e2;
+  const e3 = (props[key]?.title || []).map(t => t?.plain_text || "").join("").trim(); if (e3 && isEmail(e3)) return e3;
+  return "";
+}
+
+/* ====== 說明 ====== */
+function helpText(){
+  return [
+    "可用指令：",
+    "• 綁定 your@email.com",
+    "• 狀態 / 我的狀態",
+    "• 簽到 [內容]",
+    "• 心得 你的心得……",
+    "• 主題 基礎理論  （或直接輸入：基礎理論）",
+    "• 顯示全部 主題 基礎理論",
+    "• 直接輸入症狀關鍵字（例：肩頸、頭暈、胸悶）"
+  ].join("\n");
+}
+function fmtDate(iso){ try{ const d=new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}catch{return iso;} }
+function shortId(id){ return id ? id.replace(/-/g,"").slice(0,8) : ""; }
