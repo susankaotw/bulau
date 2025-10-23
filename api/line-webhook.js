@@ -1,21 +1,29 @@
 // api/line-webhook.js
 // 功能：綁定 Email、查會員狀態、簽到、心得、症狀查詢（呼叫 ANSWER_URL）
-// 注意：已固定寫入 Notion 紀錄 DB 欄位：AI回覆、對應脊椎分節（只在存在時更新）
-// 修正：移除不存在的 API回應碼 欄位；避免 400 validation_error
+// 修正：加入會員狀態守門（停用/封鎖/過期者不可使用功能），只在欄位存在時回填 Notion
+// 注意：請確認 Notion 欄位名稱與型別與下方常數一致
 
 /* ====== 環境變數 ====== */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
-const RECORD_DB  = process.env.RECORD_DB_ID || "";               // 不老會員紀錄DB
-const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";        // 不老會員資料庫
+const RECORD_DB  = process.env.RECORD_DB_ID || "";               // 紀錄 DB
+const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";        // 會員 DB
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 
-/* 會員 DB 欄位（照你實際命名） */
-const MEMBER_EMAIL_PROP = "Email";           // 會員DB的「Email」（你的實際是 Title，我有同時支援 Email/RichText/Title）
-const MEMBER_LINE_PROP  = "LINE UserId";     // 會員DB的「LINE UserId」
+/* 會員 DB 欄位（請對齊你的 Notion） */
+const MEMBER_EMAIL_PROP = "Email";        // 你的 Email 欄位（可為 Email / RichText / Title，程式三者皆支援）
+const MEMBER_LINE_PROP  = "LINE UserId";  // 綁定用
+const MEMBER_STATUS_PROP= "狀態";         // Select
+const MEMBER_LEVEL_PROP = "等級";         // Select
+const MEMBER_EXPIRE_PROP= "有效日期";     // Date
 
-/* 紀錄 DB 欄位（照你截圖命名） */
+/* 可調參：允許/封鎖狀態名單＆是否檢查有效日期過期 */
+const ACTIVE_STATUS_NAMES = ["啟用", "Active", "有效", "試用"]; // 視你 DB 可能的字樣擴充
+const BLOCK_STATUS_NAMES  = ["停用", "封鎖", "黑名單", "禁用"];
+const CHECK_EXPIRE = true;  // 若 true，過期也視為不允許
+
+/* 紀錄 DB 欄位（請對齊你的 Notion） */
 const REC_TITLE  = "標題";
 const REC_EMAIL  = "Email";
 const REC_UID    = "UserId";
@@ -60,13 +68,14 @@ async function handleEvent(ev) {
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
 
-  // Quick Reply：「顯示全部 xxx」
+  // Quick Reply：「顯示全部 xxx」→ 需要會員狀態允許
   const showAllMatch = text.match(/^顯示(全部|更多)(?:\s|$)(.+)/);
   if (showAllMatch) {
     const query = normalizeText(showAllMatch[2] || "");
-    const ensured = await ensureEmailForUser(userId);
-    if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
-    const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: ensured.email }, 15000);
+    const gate = await ensureMemberAllowed(userId);
+    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+
+    const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
     const list = coerceList(ans);
     const msgAll = formatSymptomsAll(query, list, 12);
     await replyText(replyToken, msgAll);
@@ -76,7 +85,7 @@ async function handleEvent(ev) {
   // help
   if (/^(help|幫助|\?|指令)$/i.test(text)) { await replyText(replyToken, helpText()); return; }
 
-  // 綁定
+  // 綁定（不檢核狀態，讓使用者能先綁定）
   if (/^綁定\s+/i.test(text) || isEmail(text)) {
     let email = text;
     if (/^綁定\s+/i.test(email)) email = normalizeText(email.replace(/^綁定\s+/i, ""));
@@ -89,7 +98,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 狀態
+  // 狀態（可查，無論是否停用）
   if (/^(我的)?狀態$/i.test(text)) {
     const info = await getMemberInfoByLineId(userId);
     if (!info) { await replyText(replyToken, "尚未綁定 Email。請輸入：綁定 your@email.com"); return; }
@@ -101,35 +110,37 @@ async function handleEvent(ev) {
     return;
   }
 
-  // 簽到
+  // 簽到（需允許）
   if (/^(簽到|打卡)(?:\s|$)/.test(text)) {
-    const ensured = await ensureEmailForUser(userId);
-    if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
+    const gate = await ensureMemberAllowed(userId);
+    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+
     const content = normalizeText(text.replace(/^(簽到|打卡)(?:\s|$)/, "")) || "簽到";
-    const pageId = await writeRecord({ email: ensured.email, userId, category:"簽到", content });
+    const pageId = await writeRecord({ email: gate.email, userId, category:"簽到", content });
     await replyText(replyToken, `✅ 已簽到！\n內容：${content}\n(記錄ID: ${shortId(pageId)})`);
     return;
   }
 
-  // 心得
+  // 心得（需允許）
   if (/^心得(?:\s|$)/.test(text)) {
-    const ensured = await ensureEmailForUser(userId);
-    if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
+    const gate = await ensureMemberAllowed(userId);
+    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+
     const content = normalizeText(text.replace(/^心得(?:\s|$)/, ""));
     if (!content) { await replyText(replyToken, "請在「心得」後面接文字，例如：心得 今天的頸胸交界手感更清楚了"); return; }
-    const pageId = await writeRecord({ email: ensured.email, userId, category:"心得", content });
+    const pageId = await writeRecord({ email: gate.email, userId, category:"心得", content });
     await replyText(replyToken, `📝 已寫入心得！\n${content}\n(記錄ID: ${shortId(pageId)})`);
     return;
   }
 
-  // 其餘 → 症狀查詢（卡片樣式 + Quick Reply）
-  const ensured = await ensureEmailForUser(userId);
-  if (!ensured.email) { await replyText(replyToken, ensured.hint); return; }
+  // 其餘 → 症狀查詢（需允許）
+  const gate = await ensureMemberAllowed(userId);
+  if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
   const category = "症狀查詢";
-  const pageId = await writeRecord({ email: ensured.email, userId, category, content:text });
+  const pageId = await writeRecord({ email: gate.email, userId, category, content:text });
 
-  const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: ensured.email }, 15000);
+  const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: gate.email }, 15000);
   const list = coerceList(ans);
 
   // 回填第一筆（只寫存在欄位）
@@ -144,6 +155,50 @@ async function handleEvent(ev) {
   } else {
     await replyText(replyToken, out.text);
   }
+}
+
+/* ====== 會員狀態守門 ====== */
+async function ensureMemberAllowed(userId) {
+  // 先要有綁定
+  const info = await getMemberInfoByLineId(userId);
+  if (!info || !isEmail(info.email)) {
+    return { ok:false, email:"", hint:"尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com" };
+  }
+
+  const now = new Date();
+  const statusName = String(info.status || "").trim();
+  const expireIso  = info.expire ? String(info.expire) : "";
+
+  // 1) 明確封鎖狀態（停用/封鎖等）→ 不允許
+  if (statusName && BLOCK_STATUS_NAMES.includes(statusName)) {
+    return { ok:false, email:info.email,
+      hint:`此帳號目前狀態為「${statusName}」，暫停使用查詢/簽到/心得功能。如需啟用，請聯絡客服。` };
+  }
+
+  // 2) 若設定了 ACTIVE 名單，且狀態不在 ACTIVE 也不在 BLOCK → 可視需要改成不允許
+  // 這裡採寬鬆策略：只要不是在 BLOCK 名單，就暫視為允許。
+  const allowedByStatus = !BLOCK_STATUS_NAMES.includes(statusName);
+
+  // 3) 檢查有效日期
+  let allowedByExpire = true;
+  if (CHECK_EXPIRE && expireIso) {
+    const expDate = new Date(expireIso);
+    if (String(expDate) !== "Invalid Date" && expDate < new Date(now.toDateString())) {
+      // 已過期（以日期為準，不含時間）
+      allowedByExpire = false;
+    }
+  }
+
+  if (!allowedByStatus) {
+    return { ok:false, email:info.email,
+      hint:`此帳號目前狀態為「${statusName}」，暫停使用查詢/簽到/心得功能。` };
+  }
+  if (!allowedByExpire) {
+    return { ok:false, email:info.email,
+      hint:`此帳號已過有效日期（${fmtDate(info.expire)}），目前暫停使用。請聯絡客服續期或恢復權限。` };
+  }
+
+  return { ok:true, email:info.email, status:statusName, expire:info.expire };
 }
 
 /* ====== 症狀回覆格式 ====== */
@@ -171,7 +226,7 @@ function formatSymptomsMessage(query, items, showN = 3) {
       "・臨床流程建議：—",
       "・經絡與補充：—",
       "・AI回覆：—",
-        ""
+      ""
     );
   } else {
     shown.forEach((it, idx) => {
@@ -213,7 +268,7 @@ function formatSymptomsAll(query, items, limit = 12) {
       "・臨床流程建議：—",
       "・經絡與補充：—",
       "・AI回覆：—",
-        ""
+      ""
     );
   } else {
     arr.forEach((it, idx) => {
@@ -246,26 +301,8 @@ function getField(obj, keys) {
 }
 
 /* ====== 綁定 / 會員查詢 ====== */
-async function ensureEmailForUser(userId) {
-  const email = await getEmailByLineId(userId);
-  if (email) return { email, justBound:false, hint:"" };
-  return { email:"", justBound:false, hint:"尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com" };
-}
-
-// 以 LINE UserId 查 Email（支援 Email/RichText/Title）
-async function getEmailByLineId(userId) {
-  if (!MEMBER_DB || !userId) return "";
-  const r = await notionQueryDatabase(MEMBER_DB, {
-    filter: { property: MEMBER_LINE_PROP, rich_text: { equals: userId } },
-    page_size: 1
-  });
-  if (!r?.results?.length) return "";
-  const props = r.results[0]?.properties || {};
-  const email = readPropEmail(props, MEMBER_EMAIL_PROP);
-  return isEmail(email) ? email : "";
-}
-
 async function getMemberInfoByLineId(userId) {
+  if (!MEMBER_DB || !userId) return null;
   const r = await notionQueryDatabase(MEMBER_DB, {
     filter: { property: MEMBER_LINE_PROP, rich_text: { equals: userId } },
     page_size: 1
@@ -273,15 +310,14 @@ async function getMemberInfoByLineId(userId) {
   if (!r?.results?.length) return null;
   const page = r.results[0];
   const p = page.properties || {};
-  const email = readPropEmail(p, MEMBER_EMAIL_PROP);
-  const status = p["狀態"]?.select?.name || "";
-  const level  = p["等級"]?.select?.name || "";
-  const expire = p["有效日期"]?.date?.start || "";
+  const email  = readPropEmail(p, MEMBER_EMAIL_PROP);
+  const status = p[MEMBER_STATUS_PROP]?.select?.name || "";
+  const level  = p[MEMBER_LEVEL_PROP]?.select?.name || "";
+  const expire = p[MEMBER_EXPIRE_PROP]?.date?.start || "";
   const lineBind = (p[MEMBER_LINE_PROP]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
   return { email, status, level, expire, lineBind };
 }
 
-// 綁定：用 Email 找會員 → 寫入 LINE UserId
 async function bindEmailToLine(userId, email) {
   if (!MEMBER_DB || !userId || !isEmail(email)) return false;
 
@@ -358,7 +394,7 @@ async function notionCreatePage(dbId, properties) {
   return { ok: r.ok, json: j, status: r.status };
 }
 
-/* ====== 紀錄 DB 寫入 ====== */
+/* ====== 紀錄 DB 寫入／回填 ====== */
 async function writeRecord({ email, userId, category, content }) {
   const nowISO = new Date().toISOString();
   const nowTW  = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
@@ -379,7 +415,6 @@ async function writeRecord({ email, userId, category, content }) {
   return pageId;
 }
 
-// 只更新「AI回覆」「對應脊椎分節」且欄位存在才寫入
 async function patchRecordById(pageId, { seg, tip }) {
   if (!pageId) return;
 
@@ -395,7 +430,6 @@ async function patchRecordById(pageId, { seg, tip }) {
     outProps[REC_AI] = buildPropValueByType(propsNow[REC_AI], tip ?? "");
   }
 
-  // 沒有匹配欄位就跳過，避免 400
   const keys = Object.keys(outProps);
   if (!keys.length) { console.warn("[patchRecordById] no matched properties to update"); return; }
 
@@ -403,7 +437,7 @@ async function patchRecordById(pageId, { seg, tip }) {
   if (!ok) console.error("[patchRecordById] failed", outProps);
 }
 
-/* ====== Notion 辅助：讀頁面、型別適配 ====== */
+/* ====== Notion 輔助 ====== */
 async function notionGetPage(pageId) {
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "GET",
@@ -522,10 +556,10 @@ function helpText() {
     "可用指令：",
     "• 綁定 your@email.com   → 綁定 LINE 與會員",
     "• 我的狀態 / 狀態        → 查詢會員狀態/等級/有效日期",
-    "• 簽到 [內容]            → 今日簽到（可附註）",
-    "• 心得 你的心得……        → 紀錄學習/調理心得",
-    "• 直接輸入症狀關鍵字      → 例如：肩頸痠痛、頭暈、胸悶、胃痛、腰痠",
-    "• 顯示全部 關鍵字         → 顯示該關鍵字的所有對應結果",
+    "• 簽到 [內容]            → 今日簽到（需帳號啟用）",
+    "• 心得 你的心得……        → 紀錄學習/調理心得（需帳號啟用）",
+    "• 直接輸入症狀關鍵字      → 例如：肩頸痠痛、頭暈、胸悶、胃痛、腰痠（需帳號啟用）",
+    "• 顯示全部 關鍵字         → 顯示該關鍵字所有對應（需帳號啟用）",
   ].join("\n");
 }
 function fmtDate(iso) { try { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; } catch { return iso; } }
