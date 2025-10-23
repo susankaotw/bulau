@@ -173,15 +173,15 @@ async function handleEvent(ev){
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
   const flex = itemsToFlexCarousel(list, `查詢：${text}`);
-const okFlex = await replyFlex(replyToken, flex);
-if (!okFlex) {
-  const out = formatSymptomsMessage(text, list, 3);
-  if (out.moreCount > 0) {
-    await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 ${text}` }]);
-  } else {
-    await replyText(replyToken, out.text);
+  const okFlex = await replyFlex(replyToken, flex);
+  if (!okFlex) {
+    const out = formatSymptomsMessage(text, list, 3);
+    if (out.moreCount > 0) {
+      await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 ${text}` }]);
+    } else {
+      await replyText(replyToken, out.text);
+    }
   }
-}
 }
 
 /* ====== 主題查詢子流程 ====== */
@@ -200,18 +200,18 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
-const outList = items; // 直接拿 items
-const flex = itemsToFlexCarousel(outList, `主題：${topic}`);
-const okFlex = await replyFlex(replyToken, flex);
-if (!okFlex) {
-  const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
-  if (out.moreCount > 0) {
-    await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
-  } else {
-    await replyText(replyToken, out.text);
+  const outList = items; // 直接拿 items
+  const flex = itemsToFlexCarousel(outList, `主題：${topic}`);
+  const okFlex = await replyFlex(replyToken, flex);
+  if (!okFlex) {
+    const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
+    if (out.moreCount > 0) {
+      await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
+    } else {
+      await replyText(replyToken, out.text);
+    }
   }
-}
-}
+} // ★ 這一行就是遺漏的收尾大括號
 
 /* ====== QA_DB 查詢 ====== */
 async function queryQaByTopic(topic, limit=10){
@@ -234,7 +234,7 @@ function pageToItem(page){
     主題:  p[QA_TOPIC]?.select?.name || "",
     對應脊椎分節: rText(p[QA_SEGMENT]) || "",
     教材版回覆: rText(p[QA_REPLY]) || "",
-    教材重點: rText(p[QA_REPLY]) || "",   // 供相容鍵名（同樣等於教材版回覆）
+    教材重點: rText(p[QA_REPLY]) || "",   // 相容鍵名（同樣等於教材版回覆）
     臨床流程建議: rText(p[QA_FLOW]) || "",
     經絡與補充: rText(p[QA_MERIDIAN]) || "",
   };
@@ -267,7 +267,7 @@ function formatSymptomsMessage(query, items, showN=3){
   } else {
     shown.forEach((it, idx) => {
       const q    = getField(it, ["question","問題","query"]) || query;
-      const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
+      const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
       const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
       const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
       const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
@@ -307,7 +307,7 @@ function formatSymptomsAll(query, items, limit=50){
   } else {
     arr.forEach((it, idx) => {
       const q    = getField(it, ["question","問題","query"]) || query;
-      const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
+      const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
       const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
       const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
       const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
@@ -392,7 +392,7 @@ async function notionQueryDatabase(dbId, body){
 async function notionPatchPage(pageId, data){
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${NOTION_KEY}", "Notion-Version": "${NOTION_VER}", "Content-Type": "application/json" },
     body: JSON.stringify(data || {})
   });
   if (!r.ok) console.error("[notionPatchPage]", r.status, await safeText(r));
@@ -575,5 +575,3 @@ function itemsToFlexCarousel(items, titlePrefix="查詢") {
   if (bubbles.length === 1) return bubbles[0]; // 單張 bubble
   return { type: "carousel", contents: bubbles };
 }
-
-
