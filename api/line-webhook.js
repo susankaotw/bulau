@@ -211,6 +211,7 @@ if (!okFlex) {
     await replyText(replyToken, out.text);
   }
 }
+}
 
 /* ====== QA_DB 查詢 ====== */
 async function queryQaByTopic(topic, limit=10){
