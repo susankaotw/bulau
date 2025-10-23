@@ -144,10 +144,10 @@ async function handleEvent(ev) {
   const list = coerceList(ans);
 
   // 回填第一筆（只寫存在欄位）
-  const first    = list[0] || ans?.answer || {};
-  const segFirst = getField(first, ["segments", "segment", "對應脊椎分節"]) || "";
-  const tipFirst = getField(first, ["tips", "summary", "reply", "教材重點", "臨床流程建議"]) || "";
-  await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
+const first    = list[0] || ans?.answer || {};
+const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
+const tipFirst = getField(first, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "";
+await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
   const out = formatSymptomsMessage(text, list, 3);
   if (out.moreCount > 0) {
@@ -231,7 +231,7 @@ function formatSymptomsMessage(query, items, showN = 3) {
   } else {
     shown.forEach((it, idx) => {
       const q    = getField(it, ["question", "問題", "query"]) || query;
-      const key1 = getField(it, ["教材重點", "tips", "summary", "reply", "臨床流程建議"]) || "—";
+     const key1 = getField(it, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
       const seg  = getField(it, ["segments", "segment", "對應脊椎分節"]) || "—";
       const flow = getField(it, ["臨床流程建議", "flow", "process"]) || "—";
       const mer  = getField(it, ["meridians", "meridian", "經絡", "經絡與補充", "經絡強補充"]) || "—";
