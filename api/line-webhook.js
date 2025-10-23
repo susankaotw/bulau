@@ -68,28 +68,33 @@ async function handleEvent(ev){
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
 
-  // Quick Reply：「顯示全部 主題 XXX」/「顯示全部 XXX(症狀)」
-  const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
-  if (mShowAll) {
-    const query = normalizeText(mShowAll[2] || "");
-    const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+// Quick Reply：「顯示全部 主題 XXX」/「顯示全部 XXX(症狀)」
+const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
+if (mShowAll) {
+  const query = normalizeText(mShowAll[2] || "");
+  const gate = await ensureMemberAllowed(userId);
+  if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
-    const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
-    if (mTopic) {
-      const topic = normalizeText(mTopic[1]);
-      const list = await queryQaByTopic(topic, 50);
-      const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
-      await replyText(replyToken, msg);
-      return;
-    }
-
-    const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
-    const list = coerceList(ans);
-    const msgAll = formatSymptomsAll(query, list, 50);
-    await replyText(replyToken, msgAll);
+  // 「顯示全部 主題 XXX」
+  const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
+  if (mTopic) {
+    const topic = normalizeText(mTopic[1]);
+    const list = await queryQaByTopic(topic, 50);
+    if (!list.length) { await replyText(replyToken, notFoundMessage(topic)); return; }
+    const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
+    await replyText(replyToken, msg);
     return;
   }
+
+  // 其餘 → 症狀（ANSWER_URL）
+  const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
+  const list = coerceList(ans);
+  if (!list.length) { await replyText(replyToken, notFoundMessage(query)); return; }
+  const msgAll = formatSymptomsAll(query, list, 50);
+  await replyText(replyToken, msgAll);
+  return;
+}
+
 
   // help
   if (/^(help|幫助|\?|指令)$/i.test(text)) { await replyText(replyToken, helpText()); return; }
@@ -585,3 +590,5 @@ function itemsToFlexCarousel(items, titlePrefix="查詢") {
   if (bubbles.length === 1) return bubbles[0]; // 單張 bubble
   return { type: "carousel", contents: bubbles };
 }
+
+function notFoundMessage(q){ return `找不到[${String(q || "").trim()}]的教材內容`; }
