@@ -196,7 +196,11 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
-  const out = formatSymptomsMessage(`主題：${topic}`, items, 4); // 你要一次看到 4 筆
+const outList = items; // 直接拿 items
+const flex = itemsToFlexCarousel(outList, `主題：${topic}`);
+const okFlex = await replyFlex(replyToken, flex);
+if (!okFlex) {
+  const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
   if (out.moreCount > 0) {
     await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
   } else {
@@ -505,3 +509,66 @@ function helpText(){
 }
 function fmtDate(iso){ try{ const d=new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}catch{return iso;} }
 function shortId(id){ return id ? id.replace(/-/g,"").slice(0,8) : ""; }
+
+// ===== LINE Flex 回覆（表格樣式） =====
+async function replyFlex(replyToken, flex) {
+  if (!LINE_TOKEN) { console.warn("[replyFlex] missing LINE_CHANNEL_ACCESS_TOKEN"); return false; }
+  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${LINE_TOKEN}` },
+    body: JSON.stringify({
+      replyToken,
+      messages: [{ type: "flex", altText: "查詢結果", contents: flex }]
+    })
+  });
+  if (!r.ok) { console.error("[replyFlex]", r.status, await safeText(r)); return false; }
+  return true;
+}
+
+// ===== 症狀結果 → Flex 表格 =====
+function buildTableRow(label, value) {
+  return {
+    type: "box", layout: "baseline", spacing: "sm",
+    contents: [
+      { type: "text", text: String(label), size: "sm", weight: "bold", flex: 3, wrap: true },
+      { type: "text", text: String(value || "—"), size: "sm", flex: 9, wrap: true }
+    ]
+  };
+}
+
+function itemToFlexBubble(item, title) {
+  const q    = getField(item, ["question","問題","query"]) || "—";
+  const key1 = getField(item, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—"; // 教材重點=教材版回覆
+  const seg  = getField(item, ["對應脊椎分節","segments","segment"]) || "—";
+  const flow = getField(item, ["臨床流程建議","flow","process"]) || "—";
+  const mer  = getField(item, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
+  const ai   = getField(item, ["AI回覆","ai_reply","ai","answer"]) || "—";
+
+  return {
+    type: "bubble",
+    header: {
+      type: "box", layout: "vertical",
+      contents: [{ type: "text", text: String(title).slice(0, 36), weight: "bold", size: "md" }]
+    },
+    body: {
+      type: "box", layout: "vertical", spacing: "sm",
+      contents: [
+        buildTableRow("問題", q),
+        buildTableRow("教材重點", key1),
+        buildTableRow("對應脊椎分節", seg),
+        buildTableRow("臨床流程建議", flow),
+        buildTableRow("經絡與補充", mer),
+        buildTableRow("AI回覆", ai)
+      ]
+    }
+  };
+}
+
+function itemsToFlexCarousel(items, titlePrefix="查詢") {
+  const arr = (items || []).slice(0, 10); // LINE 最多10個 bubble
+  const bubbles = arr.map((it, idx) => itemToFlexBubble(it, `${titlePrefix} #${idx+1}`));
+  if (bubbles.length === 1) return bubbles[0]; // 單張 bubble
+  return { type: "carousel", contents: bubbles };
+}
+
+
