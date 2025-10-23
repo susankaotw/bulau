@@ -172,12 +172,16 @@ async function handleEvent(ev){
   const tipFirst = getField(first, ["教材版回覆","教材重點","tips","summary","reply"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
+  const flex = itemsToFlexCarousel(list, `查詢：${text}`);
+const okFlex = await replyFlex(replyToken, flex);
+if (!okFlex) {
   const out = formatSymptomsMessage(text, list, 3);
   if (out.moreCount > 0) {
     await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 ${text}` }]);
   } else {
     await replyText(replyToken, out.text);
   }
+}
 }
 
 /* ====== 主題查詢子流程 ====== */
