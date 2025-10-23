@@ -75,7 +75,6 @@ async function handleEvent(ev){
     const gate = await ensureMemberAllowed(userId);
     if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
-    // 若寫成「顯示全部 主題 基礎理論」→ 走主題查詢
     const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
     if (mTopic) {
       const topic = normalizeText(mTopic[1]);
@@ -85,7 +84,6 @@ async function handleEvent(ev){
       return;
     }
 
-    // 其餘 → 症狀（ANSWER_URL）
     const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
     const list = coerceList(ans);
     const msgAll = formatSymptomsAll(query, list, 50);
@@ -142,14 +140,12 @@ async function handleEvent(ev){
   }
 
   // ===== 主題查詢 =====
-  // 1) 明確指令：主題 XXX
   const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(text);
   if (mTopic) {
     const topic = normalizeText(mTopic[1]);
     await doTopicSearch(replyToken, userId, topic);
     return;
   }
-  // 2) 直接輸入一個字串 → 先當「主題」查（Select equals），若有結果就用主題模式
   if (QA_DB_ID) {
     const itemsAsTopic = await queryQaByTopic(text, 10);
     if (itemsAsTopic.length > 0) {
@@ -168,7 +164,6 @@ async function handleEvent(ev){
 
   const first    = list[0] || ans?.answer || {};
   const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
-  // 教材重點一律優先《教材版回覆》
   const tipFirst = getField(first, ["教材版回覆","教材重點","tips","summary","reply"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
@@ -194,13 +189,12 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
 
   const items = Array.isArray(itemsOptional) ? itemsOptional : await queryQaByTopic(topic, 10);
 
-  // 取第一筆做回填
   const first    = items[0] || {};
   const segFirst = getField(first, ["對應脊椎分節"]) || "";
   const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
-  const outList = items; // 直接拿 items
+  const outList = items;
   const flex = itemsToFlexCarousel(outList, `主題：${topic}`);
   const okFlex = await replyFlex(replyToken, flex);
   if (!okFlex) {
@@ -211,7 +205,7 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
       await replyText(replyToken, out.text);
     }
   }
-} // ★ 這一行就是遺漏的收尾大括號
+}
 
 /* ====== QA_DB 查詢 ====== */
 async function queryQaByTopic(topic, limit=10){
@@ -380,19 +374,27 @@ async function bindEmailToLine(userId, email){
   return await notionPatchPage(pageId, { properties: { [MEMBER_LINE_PROP]: { rich_text: [{ text: { content: userId } }] } } });
 }
 
-/* ====== Notion 共用 ====== */
+/* ====== Notion 共用（修正 Authorization/引號） ====== */
 async function notionQueryDatabase(dbId, body){
-  const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+  const r = await fetch("https://api.notion.com/v1/databases/" + dbId + "/query", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" },
+    headers: {
+      "Authorization": "Bearer " + NOTION_KEY,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(body || {})
   });
   try { return await r.json(); } catch { return {}; }
 }
 async function notionPatchPage(pageId, data){
-  const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+  const r = await fetch("https://api.notion.com/v1/pages/" + pageId, {
     method: "PATCH",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}", "Notion-Version": "${NOTION_VER}", "Content-Type": "application/json" },
+    headers: {
+      "Authorization": "Bearer " + NOTION_KEY,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(data || {})
   });
   if (!r.ok) console.error("[notionPatchPage]", r.status, await safeText(r));
@@ -401,7 +403,11 @@ async function notionPatchPage(pageId, data){
 async function notionCreatePage(dbId, properties){
   const r = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" },
+    headers: {
+      "Authorization": "Bearer " + NOTION_KEY,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify({ parent: { database_id: dbId }, properties })
   });
   const j = await r.json().catch(() => ({}));
@@ -442,9 +448,13 @@ async function patchRecordById(pageId, { seg, tip }){
 
 /* ====== Notion 輔助 ====== */
 async function notionGetPage(pageId){
-  const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+  const r = await fetch("https://api.notion.com/v1/pages/" + pageId, {
     method: "GET",
-    headers: { "Authorization": `Bearer ${NOTION_KEY}`, "Notion-Version": NOTION_VER, "Content-Type": "application/json" }
+    headers: {
+      "Authorization": "Bearer " + NOTION_KEY,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json"
+    }
   });
   try { return await r.json(); } catch { return {}; }
 }
@@ -465,7 +475,7 @@ async function replyText(replyToken, text){
   if (!LINE_TOKEN) { console.warn("[replyText] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${LINE_TOKEN}` },
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
     body: JSON.stringify({ replyToken, messages: [{ type: "text", text: String(text||"").slice(0, 4900) }] })
   });
   if (!r.ok) console.error("[replyText]", r.status, await safeText(r));
@@ -475,7 +485,7 @@ async function replyTextQR(replyToken, text, quickList=[]){
   const items = (quickList||[]).map(q => ({ type:"action", action:{ type:"message", label:q.label, text:q.text }})).slice(0,12);
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${LINE_TOKEN}` },
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
     body: JSON.stringify({ replyToken, messages: [{ type:"text", text:String(text||"").slice(0,4900), quickReply: items.length?{ items }:undefined }] })
   });
   if (!r.ok) console.error("[replyTextQR]", r.status, await safeText(r));
@@ -520,7 +530,7 @@ async function replyFlex(replyToken, flex) {
   if (!LINE_TOKEN) { console.warn("[replyFlex] missing LINE_CHANNEL_ACCESS_TOKEN"); return false; }
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${LINE_TOKEN}` },
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
     body: JSON.stringify({
       replyToken,
       messages: [{ type: "flex", altText: "查詢結果", contents: flex }]
