@@ -6,7 +6,19 @@ const OPENAI_MODEL   = "gpt-4o-mini";
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const RECORD_DB_ID   = process.env.RECORD_DB_ID;
 
-// 依你「不老會員紀錄DB」欄位名做 mapping（右側要與 Notion 完全一致）
+// === Prompt 函式要先宣告 ===
+function buildPrompt(userTopic) {
+  return [
+    {
+      role: "system",
+      content:
+        "你是一位溫柔、療癒、可信任的台灣行銷文案助手，請用 50–80 字寫 IG 貼文開頭，避免醫療/療效承諾字眼，結尾加 2–4 個 hashtag（繁體）。",
+    },
+    { role: "user", content: userTopic },
+  ];
+}
+
+// === Notion 欄位 mapping ===
 const COL = {
   title: "標題",
   email: "Email",
@@ -18,33 +30,39 @@ const COL = {
   aiAnswer: "AI回覆",
 };
 
-// ✅ 對應：Email=Email 型別、來源=Select 型別
+// === Notion 寫入函式 ===
 async function writeNotion({ title, email, userId, content, aiText, source }) {
   const props = {};
 
-  // 標題（Title）
+  // 標題
   props[COL.title] = {
     title: [{ type: "text", text: { content: title || "AI 產文紀錄" } }],
   };
 
-  // Email（Email 型別 → 用 { email }）
+  // Email（Email 型別）
   if (COL.email && email) {
     props[COL.email] = { email };
   }
 
-  // UserId / 內容 / AI回覆（Rich text）
-  if (COL.userId)  props[COL.userId]  = { rich_text: [{ text: { content: userId || "" } }] };
-  if (COL.content) props[COL.content] = { rich_text: [{ text: { content: content || "" } }] };
-  if (COL.aiAnswer)props[COL.aiAnswer]= { rich_text: [{ text: { content: aiText || "" } }] };
+  // UserId、內容、AI回覆（Rich text）
+  if (COL.userId)
+    props[COL.userId] = { rich_text: [{ text: { content: userId || "" } }] };
+  if (COL.content)
+    props[COL.content] = { rich_text: [{ text: { content: content || "" } }] };
+  if (COL.aiAnswer)
+    props[COL.aiAnswer] = { rich_text: [{ text: { content: aiText || "" } }] };
 
-  // 類別（Select）→ 先在 Notion 建好「AI產文」選項
-  if (COL.category) props[COL.category] = { select: { name: "AI產文" } };
+  // 類別（Select）
+  if (COL.category)
+    props[COL.category] = { select: { name: "AI產文" } };
 
   // 日期（Date）
-  if (COL.date) props[COL.date] = { date: { start: new Date().toISOString() } };
+  if (COL.date)
+    props[COL.date] = { date: { start: new Date().toISOString() } };
 
-  // 來源（Select）→ 你的表是 Select，所以保持 select
-  if (COL.source) props[COL.source] = { select: { name: source || "API" } };
+  // 來源（Select）
+  if (COL.source)
+    props[COL.source] = { select: { name: source || "API" } };
 
   const r = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
@@ -64,30 +82,40 @@ async function writeNotion({ title, email, userId, content, aiText, source }) {
   return data;
 }
 
-
+// === API Handler ===
 export default async function handler(req, res) {
   try {
     // 健康檢查（GET）
     if (req.method === "GET") {
-      return res.status(200).json({ ok: true, hint: "POST { topic, userId, email? }" });
+      return res
+        .status(200)
+        .json({ ok: true, hint: "POST { topic, userId, email? }" });
     }
-    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+    if (req.method !== "POST")
+      return res.status(405).send("Method Not Allowed");
 
     const { topic, userId = "", email = "" } = req.body || {};
-    if (!topic) return res.status(400).json({ ok: false, error: "缺少 topic" });
+    if (!topic)
+      return res.status(400).json({ ok: false, error: "缺少 topic" });
 
     // 呼叫 OpenAI 產文
     const started = Date.now();
-    const c = await client.chat.completions.create({
+    const completion = await client.chat.completions.create({
       model: OPENAI_MODEL,
-      messages: prompt(topic),
+      messages: buildPrompt(topic),
       temperature: 0.7,
     });
     const latency = Date.now() - started;
-    const answer  = c.choices?.[0]?.message?.content?.trim() || "";
-    const usage   = c.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    const answer =
+      completion.choices?.[0]?.message?.content?.trim() || "";
+    const usage =
+      completion.usage || {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+      };
 
-    // 回寫 Notion
+    // 寫入 Notion
     await writeNotion({
       title: `行銷文案｜${topic.slice(0, 30)}`,
       email,
@@ -97,9 +125,13 @@ export default async function handler(req, res) {
       source: "API",
     });
 
-    return res.status(200).json({ ok: true, answer, tokens: usage, latency_ms: latency });
+    return res
+      .status(200)
+      .json({ ok: true, answer, tokens: usage, latency_ms: latency });
   } catch (err) {
     console.error("[generate-copy] error:", err);
-    return res.status(500).json({ ok: false, error: err?.message || "internal error" });
+    return res
+      .status(500)
+      .json({ ok: false, error: err?.message || "internal error" });
   }
 }
