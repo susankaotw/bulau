@@ -27,7 +27,7 @@ const CHECK_EXPIRE = true;
 const QA_QUESTION = "問題";
 const QA_TOPIC    = "主題";
 const QA_SEGMENT  = "對應脊椎分節";
-const QA_REPLY    = "教材版回覆";     // <<— 這欄就是教材重點的來源
+const QA_REPLY    = "教材版回覆";     // <<— 教材重點來源
 const QA_FLOW     = "臨床流程建議";
 const QA_MERIDIAN = "經絡與補充";
 
@@ -75,21 +75,35 @@ async function handleEvent(ev){
     const gate = await ensureMemberAllowed(userId);
     if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
-    // 若寫成「顯示全部 主題 基礎理論」→ 走主題查詢
+    // 「顯示全部 主題 基礎理論」→ 主題查詢
     const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
     if (mTopic) {
       const topic = normalizeText(mTopic[1]);
       const list = await queryQaByTopic(topic, 50);
-      const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
-      await replyText(replyToken, msg);
+
+      // Flex 版本（最多 12 張卡）
+      try {
+        const flex = buildSymptomsCarousel(`主題：${topic}`, list, Math.min(12, (list||[]).length || 1));
+        await replyFlex(replyToken, `主題：${topic}（全部）`, flex);
+      } catch (e) {
+        console.error("[showall_topic_flex_fallback]", e);
+        const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
+        await replyText(replyToken, msg);
+      }
       return;
     }
 
     // 其餘 → 症狀（ANSWER_URL）
     const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
     const list = coerceList(ans);
-    const msgAll = formatSymptomsAll(query, list, 50);
-    await replyText(replyToken, msgAll);
+    try {
+      const flex = buildSymptomsCarousel(query, list, Math.min(12, (list||[]).length || 1));
+      await replyFlex(replyToken, `查詢：「${query}」（全部）`, flex);
+    } catch (e) {
+      console.error("[showall_symptom_flex_fallback]", e);
+      const msgAll = formatSymptomsAll(query, list, 50);
+      await replyText(replyToken, msgAll);
+    }
     return;
   }
 
@@ -172,11 +186,19 @@ async function handleEvent(ev){
   const tipFirst = getField(first, ["教材版回覆","教材重點","tips","summary","reply"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
-  const out = formatSymptomsMessage(text, list, 3);
-  if (out.moreCount > 0) {
-    await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 ${text}` }]);
-  } else {
-    await replyText(replyToken, out.text);
+  // 優先用 Flex；失敗降級文字
+  try {
+    const flex = buildSymptomsCarousel(text, list, 3);
+    const moreBtn = coerceList(list).length > 3 ? [{ label:"顯示全部", text:`顯示全部 ${text}` }] : [];
+    await replyFlex(replyToken, `查詢：「${text}」`, flex, moreBtn);
+  } catch (e) {
+    console.error("[symptom_flex_fallback]", e);
+    const out = formatSymptomsMessage(text, list, 3);
+    if (out.moreCount > 0) {
+      await replyTextQR(replyToken, out.text, [{ label:"顯示全部", text:`顯示全部 ${text}` }]);
+    } else {
+      await replyText(replyToken, out.text);
+    }
   }
 }
 
@@ -196,11 +218,19 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
-  const out = formatSymptomsMessage(`主題：${topic}`, items, 4); // 你要一次看到 4 筆
-  if (out.moreCount > 0) {
-    await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
-  } else {
-    await replyText(replyToken, out.text);
+  // 優先 Flex；失敗降級文字
+  try {
+    const flex = buildSymptomsCarousel(`主題：${topic}`, items, 4);
+    const moreBtn = (items||[]).length > 4 ? [{ label:"顯示全部", text:`顯示全部 主題 ${topic}` }] : [];
+    await replyFlex(replyToken, `主題：${topic}`, flex, moreBtn);
+  } catch (e) {
+    console.error("[topic_flex_fallback]", e);
+    const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
+    if (out.moreCount > 0) {
+      await replyTextQR(replyToken, out.text, [{ label:"顯示全部", text:`顯示全部 主題 ${topic}` }]);
+    } else {
+      await replyText(replyToken, out.text);
+    }
   }
 }
 
@@ -225,13 +255,13 @@ function pageToItem(page){
     主題:  p[QA_TOPIC]?.select?.name || "",
     對應脊椎分節: rText(p[QA_SEGMENT]) || "",
     教材版回覆: rText(p[QA_REPLY]) || "",
-    教材重點: rText(p[QA_REPLY]) || "",   // 供相容鍵名（同樣等於教材版回覆）
+    教材重點: rText(p[QA_REPLY]) || "",   // 相容鍵名（同等於教材版回覆）
     臨床流程建議: rText(p[QA_FLOW]) || "",
     經絡與補充: rText(p[QA_MERIDIAN]) || "",
   };
 }
 
-/* ====== 症狀回覆格式 ====== */
+/* ====== 症狀回覆格式（純文字備援） ====== */
 function coerceList(ans) {
   if (Array.isArray(ans?.results)) return ans.results;
   if (Array.isArray(ans?.items))   return ans.items;
@@ -451,7 +481,89 @@ function buildPropValueByType(propItem, value){
   }
 }
 
-/* ====== LINE 回覆 ====== */
+/* ====== Flex 卡片（症狀/主題通用） ====== */
+// 將一筆結果轉成一張 bubble
+function buildSymptomBubble(it, idx, queryLabel){
+  const q    = getField(it, ["question","問題","query"]) || queryLabel || "查詢結果";
+  const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
+  const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
+  const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
+  const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
+  const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
+
+  const lim = (s, n=180) => String(s||"").length>n ? String(s).slice(0,n-1)+"…" : String(s||"");
+
+  return {
+    type: "bubble",
+    size: "mega",
+    header: {
+      type: "box",
+      layout: "vertical",
+      paddingAll: "12px",
+      contents: [
+        { type: "text", text: `#${idx+1} 症狀對應`, weight: "bold", size: "sm" },
+        { type: "text", text: lim(q, 60), wrap: true, size: "md" }
+      ]
+    },
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "6px",
+      contents: [
+        { type: "box", layout: "baseline", spacing: "sm", contents: [
+          { type: "text", text: "教材重點", color: "#888888", size: "sm", flex: 2 },
+          { type: "text", text: lim(key1), wrap: true, size: "sm", flex: 5 }
+        ]},
+        { type: "box", layout: "baseline", spacing: "sm", contents: [
+          { type: "text", text: "脊椎分節", color: "#888888", size: "sm", flex: 2 },
+          { type: "text", text: lim(seg, 60), wrap: true, size: "sm", flex: 5 }
+        ]},
+        { type: "box", layout: "baseline", spacing: "sm", contents: [
+          { type: "text", text: "臨床流程", color: "#888888", size: "sm", flex: 2 },
+          { type: "text", text: lim(flow), wrap: true, size: "sm", flex: 5 }
+        ]},
+        { type: "box", layout: "baseline", spacing: "sm", contents: [
+          { type: "text", text: "經絡補充", color: "#888888", size: "sm", flex: 2 },
+          { type: "text", text: lim(mer), wrap: true, size: "sm", flex: 5 }
+        ]},
+        { type: "separator", margin: "md" },
+        { type: "box", layout: "baseline", spacing: "sm", contents: [
+          { type: "text", text: "AI回覆", color: "#888888", size: "sm", flex: 2 },
+          { type: "text", text: lim(ai), wrap: true, size: "sm", flex: 5 }
+        ]}
+      ]
+    }
+  };
+}
+
+// 多筆資料 → carousel，最多 12 張（LINE 限制）
+function buildSymptomsCarousel(queryLabel, items=[], showN=3){
+  const arr = (items||[]).slice(0, Math.min(showN, 12));
+  const bubbles = arr.map((it, i) => buildSymptomBubble(it, i, queryLabel));
+  return { type: "carousel", contents: bubbles.length ? bubbles : [buildSymptomBubble({}, 0, queryLabel)] };
+}
+
+// 回覆 Flex（含 quick reply 選項）
+async function replyFlex(replyToken, altText, flexContents, quickList=[]){
+  if (!LINE_TOKEN) { console.warn("[replyFlex] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
+  const items = (quickList||[]).map(q => ({ type:"action", action:{ type:"message", label:q.label, text:q.text }})).slice(0,12);
+  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${LINE_TOKEN}` },
+    body: JSON.stringify({
+      replyToken,
+      messages: [{
+        type: "flex",
+        altText: String(altText||"查詢結果"),
+        contents: flexContents,
+        quickReply: items.length?{ items }:undefined
+      }]
+    })
+  });
+  if (!r.ok) console.error("[replyFlex]", r.status, await safeText(r));
+}
+
+/* ====== LINE 回覆（純文字/Quick Reply） ====== */
 async function replyText(replyToken, text){
   if (!LINE_TOKEN) { console.warn("[replyText] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
