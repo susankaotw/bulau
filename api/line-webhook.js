@@ -589,3 +589,133 @@ function helpText(){
 }
 function fmtDate(iso){ try{ const d=new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}catch{return iso;} }
 function shortId(id){ return id ? id.replace(/-/g,"").slice(0,8) : ""; }
+
+
+// 可用於 Node 18+ / Vercel
+import crypto from "crypto";
+import OpenAI from "openai";
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const OPENAI_MODEL = "gpt-4o-mini";
+
+const NOTION_API_KEY = process.env.NOTION_API_KEY;
+const RECORD_DB_ID   = process.env.RECORD_DB_ID;
+
+// === 依你的 Notion 欄位名稱做 mapping（勿改左側，右側改成你表的名字即可）===
+const COL = {
+  title: "標題",
+  email: "Email",
+  userId: "UserId",
+  category: "類別",
+  content: "內容",
+  date: "日期",
+  source: "來源",
+  aiAnswer: "AI回覆",
+  // 其他欄位（對應脊…）本功能不寫入，所以先不列
+};
+
+// 驗簽（可選；若你還沒啟用 LINE_CHANNEL_SECRET，可以暫時回傳 true）
+function verifyLineSignature(req) {
+  const secret = process.env.LINE_CHANNEL_SECRET;
+  if (!secret) return true;
+  const signature = req.headers["x-line-signature"];
+  const body = JSON.stringify(req.body);
+  const hash = crypto.createHmac("sha256", secret).update(body).digest("base64");
+  return hash === signature;
+}
+
+async function createNotionRecord({ title, email, userId, category, content, dateISO, source, aiText }) {
+  const props = {};
+  props[COL.title]    = { title: [{ type: "text", text: { content: title || "AI 產文紀錄" } }] };
+  if (COL.email)   props[COL.email]   = { rich_text: [{ text: { content: email || "" } }] }; // 若 Email 欄位型別是 Email，也可用 { email: email || "" }
+  if (COL.userId)  props[COL.userId]  = { rich_text: [{ text: { content: userId || "" } }] };
+  if (COL.category)props[COL.category]= { select: { name: category || "AI產文" } };
+  if (COL.content) props[COL.content] = { rich_text: [{ text: { content } }] };
+  if (COL.date)    props[COL.date]    = { date: { start: dateISO } };
+  if (COL.source)  props[COL.source]  = { select: { name: source || "LINE" } };
+  if (COL.aiAnswer)props[COL.aiAnswer]= { rich_text: [{ text: { content: aiText || "" } }] };
+
+  const res = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${NOTION_API_KEY}`,
+      "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ parent: { database_id: RECORD_DB_ID }, properties: props }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    console.error("[Notion] create failed:", data);
+    throw new Error(data?.message || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+function buildMarketingMessages(userText) {
+  return [
+    {
+      role: "system",
+      content:
+        "你是一位溫柔、療癒、可信任的台灣在地行銷文案助手。請以 50–80 字撰寫貼文開頭，避免醫療/療效承諾字眼，最後加 2–4 個 hashtag（繁體）。",
+    },
+    { role: "user", content: userText },
+  ];
+}
+
+export default async function handler(req, res) {
+  try {
+    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+    if (!verifyLineSignature(req)) return res.status(403).send("Invalid signature");
+
+    // 兼容：LINE Webhook 或 直接 JSON 測試
+    let text = "", userId = "", source = "API";
+    if (req.body?.events?.[0]) {
+      const ev = req.body.events[0];
+      text = ev.message?.text || "";
+      userId = ev.source?.userId || "";
+      source = "LINE";
+    } else {
+      text = req.body?.text || "";
+      userId = req.body?.userId || "";
+      source = "API";
+    }
+
+    // 觸發詞：「文案 」開頭（例：文案 幫我寫臉部課程開頭）
+    const trigger = /^文案[\s：:]/;
+    if (!trigger.test(text)) {
+      return res.status(200).json({ ok: true, message: "未觸發產文（請用：文案 你的主題）" });
+    }
+    const userTopic = text.replace(trigger, "").trim();
+    if (!userTopic) return res.status(200).json({ ok: false, message: "請在『文案 』後輸入主題" });
+
+    // 呼叫 OpenAI
+    const completion = await client.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: buildMarketingMessages(userTopic),
+      temperature: 0.7,
+    });
+    const aiText = completion.choices?.[0]?.message?.content?.trim() || "";
+
+    // 寫回你這張「不老會員紀錄DB」
+    const nowISO = new Date().toISOString();
+    await createNotionRecord({
+      title: `行銷文案｜${userTopic.slice(0, 30)}`,
+      email: "",                // 若你在 LINE 流程可抓到 Email 再塞；目前先留空
+      userId,
+      category: "AI產文",
+      content: userTopic,
+      dateISO: nowISO,
+      source,                   // LINE / API
+      aiText,
+    });
+
+    // 回覆
+    return res.status(200).json({ ok: true, answer: aiText });
+  } catch (err) {
+    console.error("[AI 文案] 失敗：", err?.message);
+    // 不中斷地回應
+    return res.status(500).json({ ok: false, error: err?.message || "internal error" });
+  }
+}
+
