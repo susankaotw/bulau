@@ -1,192 +1,240 @@
-// api/line-webhook.js
-// 功能：綁定 Email、查會員狀態、簽到、心得、主題查詢（Notion QA_DB）、症狀查詢（ANSWER_URL）
-// 規則：顯示「教材重點」→ 一律取 Notion 欄位《教材版回覆》
-// 守門：會員狀態=停用/封鎖/過期 → 禁用簽到/心得/查詢
+// /api/line-webhook.js  (Vercel / Node 18+, ESM)
+import crypto from "crypto";
+import OpenAI from "openai";
 
-/* ====== 環境變數 ====== */
+/* ========= 環境變數 ========= */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
 const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";
 const RECORD_DB  = process.env.RECORD_DB_ID || "";
-const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || ""; // 不老資料庫
+const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || ""; // 教材 DB
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
+const LINE_SECRET= process.env.LINE_CHANNEL_SECRET || "";
+const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = "gpt-4o-mini";
 
-/* ====== 會員 DB 欄位 ====== */
+/* ========= Notion：欄位名稱 ========= */
+/* 會員 DB */
 const MEMBER_EMAIL_PROP  = "Email";
 const MEMBER_LINE_PROP   = "LINE UserId";
-const MEMBER_STATUS_PROP = "狀態";        // Select
-const MEMBER_LEVEL_PROP  = "等級";        // Select
-const MEMBER_EXPIRE_PROP = "有效日期";    // Date
+const MEMBER_STATUS_PROP = "狀態";       // Select
+const MEMBER_LEVEL_PROP  = "等級";       // Select
+const MEMBER_EXPIRE_PROP = "有效日期";   // Date
 
-/* 守門名單（可依你的 DB 字樣調整） */
-const BLOCK_STATUS_NAMES = ["停用", "封鎖", "黑名單", "禁用"];
-const CHECK_EXPIRE = true;
-
-/* ====== QA DB 欄位 ====== */
+/* 教材 QA DB */
 const QA_QUESTION = "問題";
 const QA_TOPIC    = "主題";
 const QA_SEGMENT  = "對應脊椎分節";
-const QA_REPLY    = "教材版回覆";     // <<— 這欄就是教材重點的來源
+const QA_REPLY    = "教材版回覆";
 const QA_FLOW     = "臨床流程建議";
 const QA_MERIDIAN = "經絡與補充";
 
-/* ====== 紀錄 DB 欄位 ====== */
+/* 記錄 DB */
 const REC_TITLE = "標題";
 const REC_EMAIL = "Email";
 const REC_UID   = "UserId";
-const REC_CATE  = "類別";
-const REC_BODY  = "內容";
-const REC_DATE  = "日期";
-const REC_SRC   = "來源";
-const REC_AI    = "AI回覆";
+const REC_CATE  = "類別";   // Select
+const REC_BODY  = "內容";   // Rich text
+const REC_DATE  = "日期";   // Date
+const REC_SRC   = "來源";   // ✅ Select（已改）
+const REC_AI    = "AI回覆"; // Rich text
 const REC_SEG   = "對應脊椎分節";
 
-/* ====== 小工具 ====== */
+/* ========= 守門規則 ========= */
+const BLOCK_STATUS_NAMES = ["停用", "封鎖", "黑名單", "禁用"];
+const CHECK_EXPIRE = true;
+
+/* ========= 小工具 ========= */
 const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
-const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g," ").replace(/\s+/g," "));
-function notFoundMessage(q){ return `找不到[${String(q || "").trim()}]的教材內容`; }
+const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g, " ").replace(/\s+/g, " "));
+const notFoundMessage = (q) => `找不到[${String(q || "").trim()}]的教材內容`;
+const client = OPENAI_KEY ? new OpenAI({ apiKey: OPENAI_KEY }) : null;
 
-/* ====== 入口 ====== */
-module.exports = async (req, res) => {
+/* ========= 入口 ========= */
+export default async function handler(req, res) {
   try {
-    if (req.method === "GET") return res.status(200).send("OK");
-    if (req.method !== "POST") return res.status(405).end();
-    const events = Array.isArray(req.body?.events) ? req.body.events : [];
-    for (const ev of events) { try { await handleEvent(ev); } catch (e) { console.error("[event_error]", e); } }
-    res.status(200).json({ ok:true });
+    // 健康檢查
+    if (req.method === "GET") {
+      return res.status(200).json({
+        ok: true,
+        hint: "POST { text, userId } 或 LINE Webhook events。文案：以『文案 你的主題』觸發產文。"
+      });
+    }
+    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+
+    // LINE 驗簽（若未設定 Secret 則略過）
+    if (LINE_SECRET && !verifyLineSignature(req, LINE_SECRET)) {
+      return res.status(403).send("Invalid signature");
+    }
+
+    // 兼容：LINE Webhook & 直接 JSON 測試
+    if (Array.isArray(req.body?.events)) {
+      for (const ev of req.body.events) {
+        try { await handleEvent(ev); } catch (e) { console.error("[event_error]", e); }
+      }
+      return res.status(200).json({ ok: true });
+    } else {
+      // 直接 JSON 測試
+      const text = normalizeText(req.body?.text);
+      const userId = req.body?.userId || "";
+      if (!text) return res.status(400).json({ ok: false, error: "缺少 text" });
+      const out = await handleText(text, userId, /*replyToken*/ null, /*source*/ "API");
+      return res.status(200).json(out || { ok: true });
+    }
   } catch (e) {
     console.error("[handler_crash]", e);
-    res.status(200).json({ ok:false, error:e?.message || "unknown_error" });
+    return res.status(500).json({ ok: false, error: e?.message || "internal_error" });
   }
-};
+}
 
-/* ====== 主流程 ====== */
-async function handleEvent(ev){
+/* ========= 事件處理 ========= */
+async function handleEvent(ev) {
   if (ev.type !== "message" || ev.message?.type !== "text") return;
   const text = normalizeText(ev.message.text);
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
-  console.log("[handleEvent] text=", text);
+  await handleText(text, userId, replyToken, "LINE");
+}
 
-  // Quick Reply：「顯示全部 主題 XXX」/「顯示全部 XXX(症狀)」
+async function handleText(text, userId, replyToken, source = "LINE") {
+  // 指令：help
+  if (/^(help|幫助|\?|指令)$/i.test(text)) {
+    if (replyToken) await replyText(replyToken, helpText());
+    return { ok: true, help: true };
+  }
+
+  // 指令：綁定 email
+  if (/^綁定\s+/i.test(text) || isEmail(text)) {
+    let email = text;
+    if (/^綁定\s+/i.test(email)) email = normalizeText(email.replace(/^綁定\s+/i, ""));
+    if (!isEmail(email)) {
+      if (replyToken) await replyText(replyToken, "請輸入正確 Email，例如：綁定 test@example.com");
+      return { ok: false, error: "invalid_email" };
+    }
+    const ok = await bindEmailToLine(userId, email);
+    if (replyToken) {
+      await replyText(replyToken, ok
+        ? `✅ 已綁定 Email：${email}\n之後可直接輸入關鍵字查詢、簽到或寫心得。`
+        : "綁定失敗：找不到此 Email 的會員，或該帳號已綁定其他 LINE。"
+      );
+    }
+    return { ok };
+  }
+
+  // 指令：我的狀態
+  if (/^(我的)?狀態$/i.test(text)) {
+    const info = await getMemberInfoByLineId(userId);
+    if (!info) {
+      if (replyToken) await replyText(replyToken, "尚未綁定 Email。請輸入：綁定 your@email.com");
+      return { ok: false, error: "not_binded" };
+    }
+    const expText = info.expire ? fmtDate(info.expire) : "（未設定）";
+    const msg = `📇 會員狀態
+Email：${info.email || "（未設定或空白）"}
+狀態：${info.status || "（未設定）"}
+等級：${info.level || "（未設定）"}
+有效日期：${expText}
+LINE 綁定：${info.lineBind || "（未設定）"}`;
+    if (replyToken) await replyText(replyToken, msg);
+    return { ok: true };
+  }
+
+  // 指令：簽到
+  if (/^(簽到|打卡)(?:\s|$)/.test(text)) {
+    const gate = await ensureMemberAllowed(userId);
+    if (!gate.ok) { if (replyToken) await replyText(replyToken, gate.hint); return { ok: false, error: "forbidden" }; }
+    const content = normalizeText(text.replace(/^(簽到|打卡)(?:\s|$)/, "")) || "簽到";
+    const pageId = await writeRecord({ email: gate.email, userId, category: "簽到", content, source });
+    if (replyToken) await replyText(replyToken, `✅ 已簽到！\n內容：${content}\n(記錄ID: ${shortId(pageId)})`);
+    return { ok: true };
+  }
+
+  // 指令：心得
+  if (/^心得(?:\s|$)/.test(text)) {
+    const gate = await ensureMemberAllowed(userId);
+    if (!gate.ok) { if (replyToken) await replyText(replyToken, gate.hint); return { ok: false, error: "forbidden" }; }
+    const content = normalizeText(text.replace(/^心得(?:\s|$)/, ""));
+    if (!content) {
+      if (replyToken) await replyText(replyToken, "請在「心得」後面接文字，例如：心得 今天的頸胸交界手感更清楚了");
+      return { ok: false, error: "empty_note" };
+    }
+    const pageId = await writeRecord({ email: gate.email, userId, category: "心得", content, source });
+    if (replyToken) await replyText(replyToken, `📝 已寫入心得！\n${content}\n(記錄ID: ${shortId(pageId)})`);
+    return { ok: true };
+  }
+
+  // 指令：顯示全部
   const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
   if (mShowAll) {
     const query = normalizeText(mShowAll[2] || "");
     const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+    if (!gate.ok) { if (replyToken) await replyText(replyToken, gate.hint); return { ok: false }; }
 
-    // 「顯示全部 主題 XXX」
+    // 主題：顯示全部 主題 XXX
     const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
     if (mTopic) {
       const topic = normalizeText(mTopic[1]);
       const list = await queryQaByTopic(topic, 50);
-      console.log("[showAll.topic] topic=", topic, "len=", list.length);
-      if (!list.length) { await replyText(replyToken, notFoundMessage(topic)); return; }
+      if (!list.length) { if (replyToken) await replyText(replyToken, notFoundMessage(topic)); return { ok: true, empty: true }; }
       const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
-      await replyText(replyToken, msg);
-      return;
+      if (replyToken) await replyText(replyToken, msg);
+      return { ok: true, count: list.length };
     }
 
-    // 其餘 → 症狀（ANSWER_URL）
-    const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
+    // 其它：走症狀 API
+    const ans = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 15000);
     const list = coerceList(ans);
-    console.log("[showAll.symptom] query=", query, "len=", list.length);
-    if (!list.length) { await replyText(replyToken, notFoundMessage(query)); return; }
+    if (!list.length) { if (replyToken) await replyText(replyToken, notFoundMessage(query)); return { ok: true, empty: true }; }
     const msgAll = formatSymptomsAll(query, list, 50);
-    await replyText(replyToken, msgAll);
-    return;
+    if (replyToken) await replyText(replyToken, msgAll);
+    return { ok: true, count: list.length };
   }
 
-  // help
-  if (/^(help|幫助|\?|指令)$/i.test(text)) { await replyText(replyToken, helpText()); return; }
-
-  // 綁定
-  if (/^綁定\s+/i.test(text) || isEmail(text)) {
-    let email = text;
-    if (/^綁定\s+/i.test(email)) email = normalizeText(email.replace(/^綁定\s+/i, ""));
-    if (!isEmail(email)) { await replyText(replyToken, "請輸入正確 Email，例如：綁定 test@example.com"); return; }
-    const ok = await bindEmailToLine(userId, email);
-    await replyText(replyToken, ok
-      ? `✅ 已綁定 Email：${email}\n之後可直接輸入關鍵字查詢、簽到或寫心得。`
-      : "綁定失敗：找不到此 Email 的會員，或該帳號已綁定其他 LINE。"
-    );
-    return;
-  }
-
-  // 狀態
-  if (/^(我的)?狀態$/i.test(text)) {
-    const info = await getMemberInfoByLineId(userId);
-    if (!info) { await replyText(replyToken, "尚未綁定 Email。請輸入：綁定 your@email.com"); return; }
-    const expText = info.expire ? fmtDate(info.expire) : "（未設定）";
-    await replyText(replyToken,
-      `📇 會員狀態\nEmail：${info.email || "（未設定或空白）"}\n狀態：${info.status || "（未設定）"}\n等級：${info.level || "（未設定）"}\n有效日期：${expText}\nLINE 綁定：${info.lineBind || "（未設定）"}`
-    );
-    return;
-  }
-
-  // 簽到
-  if (/^(簽到|打卡)(?:\s|$)/.test(text)) {
-    const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
-    const content = normalizeText(text.replace(/^(簽到|打卡)(?:\s|$)/, "")) || "簽到";
-    const pageId = await writeRecord({ email: gate.email, userId, category:"簽到", content });
-    await replyText(replyToken, `✅ 已簽到！\n內容：${content}\n(記錄ID: ${shortId(pageId)})`);
-    return;
-  }
-
-  // 心得
-  if (/^心得(?:\s|$)/.test(text)) {
-    const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
-    const content = normalizeText(text.replace(/^心得(?:\s|$)/, ""));
-    if (!content) { await replyText(replyToken, "請在「心得」後面接文字，例如：心得 今天的頸胸交界手感更清楚了"); return; }
-    const pageId = await writeRecord({ email: gate.email, userId, category:"心得", content });
-    await replyText(replyToken, `📝 已寫入心得！\n${content}\n(記錄ID: ${shortId(pageId)})`);
-    return;
-  }
-
-  // ===== 主題查詢 =====
+  // 指令：主題 XXX（或直接把整句當主題找）
   const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(text);
   if (mTopic) {
     const topic = normalizeText(mTopic[1]);
-    await doTopicSearch(replyToken, userId, topic);
-    return;
+    return await doTopicSearch(replyToken, userId, topic, source);
   }
-  // 直接字串嘗試當「主題」查
   if (QA_DB_ID) {
     const itemsAsTopic = await queryQaByTopic(text, 10);
     if (itemsAsTopic.length > 0) {
-      await doTopicSearch(replyToken, userId, text, itemsAsTopic);
-      return;
+      return await doTopicSearch(replyToken, userId, text, source, itemsAsTopic);
     }
   }
 
-  // ===== 其餘 → 症狀關鍵字查詢（ANSWER_URL）=====
-  const gate = await ensureMemberAllowed(userId);
-  if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
-
-  const pageId = await writeRecord({ email: gate.email, userId, category:"症狀查詢", content:text });
-  const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: gate.email }, 15000);
-  const list = coerceList(ans);
-  console.log("[symptom] text=", text, "len=", list.length);
-
-  // 沒結果 → 回固定句
-  if (!list.length) {
-    await replyText(replyToken, notFoundMessage(text));
-    return;
+  // 指令：文案 XXX（AI 產文）
+  const mCopy = /^文案[\s：:](.+)$/.exec(text);
+  if (mCopy) {
+    const topic = normalizeText(mCopy[1]);
+    return await doAICopy(replyToken, userId, topic, source);
   }
 
-  const first    = list[0] || ans?.answer || {};
-  const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
-  const tipFirst = getField(first, ["教材版回覆","教材重點","tips","summary","reply"]) || "";
-  await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
+  // 其它 → 症狀關鍵字查詢（ANSWER_URL）
+  const gate = await ensureMemberAllowed(userId);
+  if (!gate.ok) { if (replyToken) await replyText(replyToken, gate.hint); return { ok: false }; }
 
+  const recId = await writeRecord({ email: gate.email, userId, category: "症狀查詢", content: text, source });
+  const ans = await postJSON(ANSWER_URL, { q: text, question: text, email: gate.email }, 15000);
+  const list = coerceList(ans);
+
+  if (!list.length) {
+    if (replyToken) await replyText(replyToken, notFoundMessage(text));
+    return { ok: true, empty: true };
+  }
+
+  // 回填第一筆摘要與分節
+  const first = list[0] || ans?.answer || {};
+  const segFirst = getField(first, ["對應脊椎分節", "segments", "segment"]) || "";
+  const tipFirst = getField(first, ["教材版回覆", "教材重點", "tips", "summary", "reply"]) || "";
+  await patchRecordById(recId, { seg: segFirst, tip: tipFirst });
+
+  // 產 Flex
   const flex = itemsToFlexCarousel(list, `查詢：${text}`);
-  const okFlex = await replyFlex(replyToken, flex);
-  console.log("[replyFlex.ok?]", okFlex);
-  if (!okFlex) {
+  const okFlex = replyToken ? await replyFlex(replyToken, flex) : false;
+  if (!okFlex && replyToken) {
     const out = formatSymptomsMessage(text, list, 3);
     if (out.moreCount > 0) {
       await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 ${text}` }]);
@@ -194,33 +242,32 @@ async function handleEvent(ev){
       await replyText(replyToken, out.text);
     }
   }
+  return { ok: true, count: list.length };
 }
 
-/* ====== 主題查詢子流程 ====== */
-async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
+/* ========= 主題查詢 ========= */
+async function doTopicSearch(replyToken, userId, topicRaw, source, itemsOptional) {
   const topic = normalizeText(topicRaw);
   const gate = await ensureMemberAllowed(userId);
-  if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+  if (!gate.ok) { if (replyToken) await replyText(replyToken, gate.hint); return { ok: false }; }
 
-  const pageId = await writeRecord({ email: gate.email, userId, category:"症狀查詢", content:`主題 ${topic}` });
-
+  const recId = await writeRecord({ email: gate.email, userId, category: "症狀查詢", content: `主題 ${topic}`, source });
   const items = Array.isArray(itemsOptional) ? itemsOptional : await queryQaByTopic(topic, 10);
 
-  // 查不到任何教材
   if (!items.length) {
-    await replyText(replyToken, notFoundMessage(topic));
-    return;
+    if (replyToken) await replyText(replyToken, notFoundMessage(topic));
+    return { ok: true, empty: true };
   }
 
-  // 取第一筆做回填
-  const first    = items[0] || {};
+  // 回填第一筆
+  const first = items[0] || {};
   const segFirst = getField(first, ["對應脊椎分節"]) || "";
-  const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
-  await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
+  const tipFirst = getField(first, ["教材版回覆", "教材重點"]) || "";
+  await patchRecordById(recId, { seg: segFirst, tip: tipFirst });
 
   const flex = itemsToFlexCarousel(items, `主題：${topic}`);
-  const okFlex = await replyFlex(replyToken, flex);
-  if (!okFlex) {
+  const okFlex = replyToken ? await replyFlex(replyToken, flex) : false;
+  if (!okFlex && replyToken) {
     const out = formatSymptomsMessage(`主題：${topic}`, items, 4);
     if (out.moreCount > 0) {
       await replyTextQR(replyToken, out.text, [{ label: "顯示全部", text: `顯示全部 主題 ${topic}` }]);
@@ -228,21 +275,73 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
       await replyText(replyToken, out.text);
     }
   }
+  return { ok: true, count: items.length };
 }
 
-/* ====== QA_DB 查詢 ====== */
-async function queryQaByTopic(topic, limit=10){
+/* ========= AI 產文 ========= */
+function buildMarketingMessages(userText) {
+  return [
+    {
+      role: "system",
+      content:
+        "你是一位溫柔、療癒、可信任的台灣在地行銷文案助手。請以 50–80 字撰寫貼文開頭，避免醫療/療效承諾字眼，最後加 2–4 個 hashtag（繁體）。",
+    },
+    { role: "user", content: userText },
+  ];
+}
+
+async function doAICopy(replyToken, userId, topic, source) {
+  if (!client) {
+    if (replyToken) await replyText(replyToken, "系統未設定 OPENAI_API_KEY，無法產生文案。");
+    return { ok: false, error: "no_openai_key" };
+  }
+  const gate = await ensureMemberAllowed(userId);
+  if (!gate.ok) { if (replyToken) await replyText(replyToken, gate.hint); return { ok: false }; }
+
+  const started = Date.now();
+  const completion = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages: buildMarketingMessages(topic),
+    temperature: 0.7,
+  });
+  const latency = Date.now() - started;
+  const text = completion.choices?.[0]?.message?.content?.trim() || "";
+
+  await writeRecord({
+    email: gate.email,
+    userId,
+    category: "AI產文",
+    content: topic,
+    source, // ✅ 記錄來源為 Select
+  });
+  // 另外寫一筆只更新 AI回覆？— 直接在上面新增時就寫入 AI回覆也行
+  // 為單純起見，改為：新增同一筆時就塞 AI回覆
+  // → 重寫 writeRecord 支援 aiText（向下相容）
+  return await writeRecord({ email: gate.email, userId, category: "AI產文", content: topic, source, aiText: text })
+    .then(async (pid) => {
+      if (replyToken) await replyText(replyToken, text);
+      return { ok: true, answer: text, latency_ms: latency, id: pid };
+    })
+    .catch(async (e) => {
+      console.error("[AICopy writeRecord]", e?.message || e);
+      if (replyToken) await replyText(replyToken, text); // 仍回文字，避免體感失敗
+      return { ok: true, answer: text, warn: "notion_write_failed" };
+    });
+}
+
+/* ========= QA_DB 查詢 ========= */
+async function queryQaByTopic(topic, limit = 10) {
   if (!QA_DB_ID || !topic) return [];
   const r = await notionQueryDatabase(QA_DB_ID, {
     filter: { property: QA_TOPIC, select: { equals: topic } },
     sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-    page_size: limit
+    page_size: limit,
   });
   const pages = Array.isArray(r?.results) ? r.results : [];
   return pages.map(pageToItem);
 }
 
-function pageToItem(page){
+function pageToItem(page) {
   const p = page?.properties || {};
   const tText = (prop) => (prop?.title || []).map(t => t?.plain_text || "").join("").trim();
   const rText = (prop) => (prop?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
@@ -251,27 +350,167 @@ function pageToItem(page){
     主題:  p[QA_TOPIC]?.select?.name || "",
     對應脊椎分節: rText(p[QA_SEGMENT]) || "",
     教材版回覆: rText(p[QA_REPLY]) || "",
-    教材重點: rText(p[QA_REPLY]) || "",   // 相容鍵名（同樣等於教材版回覆）
+    教材重點: rText(p[QA_REPLY]) || "", // 相容鍵名
     臨床流程建議: rText(p[QA_FLOW]) || "",
     經絡與補充: rText(p[QA_MERIDIAN]) || "",
   };
 }
 
-/* ====== 症狀回覆格式 ====== */
+/* ========= 記錄 DB：寫入 / 更新 ========= */
+async function writeRecord({ email, userId, category, content, source, aiText }) {
+  const nowISO = new Date().toISOString();
+  const nowTW  = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
+
+  const props = {
+    [REC_TITLE]: { title: [{ text: { content: `${category}｜${nowTW}` } }] },
+    [REC_EMAIL]: email ? { email } : undefined,                   // Email 型別
+    [REC_UID]:   { rich_text: [{ text: { content: userId || "" } }] },
+    [REC_CATE]:  { select: { name: category || "記錄" } },        // Select
+    [REC_BODY]:  { rich_text: [{ text: { content: content || "" } }] },
+    [REC_DATE]:  { date: { start: nowISO } },
+    [REC_SRC]:   { select: { name: source || "LINE" } },          // ✅ Select
+    [REC_AI]:    aiText ? { rich_text: [{ text: { content: aiText } }] } : undefined,
+  };
+
+  const r = await notionCreatePage(RECORD_DB, props);
+  if (!r.ok) throw new Error("notion_create_failed");
+  return r.json?.id || "";
+}
+
+async function patchRecordById(pageId, { seg, tip }) {
+  if (!pageId) return;
+  const page = await notionGetPage(pageId);
+  const propsNow = page?.properties || {};
+  const outProps = {};
+  if (typeof seg !== "undefined" && propsNow[REC_SEG]) outProps[REC_SEG] = buildPropValueByType(propsNow[REC_SEG], seg ?? "");
+  if (typeof tip !== "undefined" && propsNow[REC_AI])  outProps[REC_AI]  = buildPropValueByType(propsNow[REC_AI],  tip ?? "");
+  const keys = Object.keys(outProps);
+  if (!keys.length) return;
+  const ok = await notionPatchPage(pageId, { properties: outProps });
+  if (!ok) console.error("[patchRecordById] failed", outProps);
+}
+
+/* ========= 會員守門 ========= */
+async function ensureMemberAllowed(userId) {
+  const info = await getMemberInfoByLineId(userId);
+  if (!info || !isEmail(info.email)) {
+    return { ok: false, email: "", hint: "尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com" };
+  }
+  const statusName = String(info.status || "").trim();
+  if (statusName && BLOCK_STATUS_NAMES.includes(statusName)) {
+    return { ok: false, email: info.email, hint: `此帳號狀態為「${statusName}」，暫停使用查詢/簽到/心得功能。` };
+  }
+  if (CHECK_EXPIRE && info.expire) {
+    const expDate = new Date(info.expire);
+    const today = new Date(new Date().toDateString());
+    if (String(expDate) !== "Invalid Date" && expDate < today) {
+      return { ok: false, email: info.email, hint: `此帳號已過有效日期（${fmtDate(info.expire)}）。` };
+    }
+  }
+  return { ok: true, email: info.email, status: info.status, expire: info.expire };
+}
+
+async function getMemberInfoByLineId(userId) {
+  if (!MEMBER_DB || !userId) return null;
+  const r = await notionQueryDatabase(MEMBER_DB, {
+    filter: { property: MEMBER_LINE_PROP, rich_text: { equals: userId } }, page_size: 1
+  });
+  if (!r?.results?.length) return null;
+  const p = r.results[0]?.properties || {};
+  const email  = readPropEmail(p, MEMBER_EMAIL_PROP);
+  const status = p[MEMBER_STATUS_PROP]?.select?.name || "";
+  const level  = p[MEMBER_LEVEL_PROP]?.select?.name || "";
+  const expire = p[MEMBER_EXPIRE_PROP]?.date?.start || "";
+  const lineBind = (p[MEMBER_LINE_PROP]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
+  return { email, status, level, expire, lineBind };
+}
+
+async function bindEmailToLine(userId, email) {
+  if (!MEMBER_DB || !userId || !isEmail(email)) return false;
+  let r = await notionQueryDatabase(MEMBER_DB, { filter: { property: MEMBER_EMAIL_PROP, email: { equals: email } }, page_size: 1 });
+  if (!r?.results?.length) r = await notionQueryDatabase(MEMBER_DB, { filter: { property: MEMBER_EMAIL_PROP, rich_text: { equals: email } }, page_size: 1 });
+  if (!r?.results?.length) r = await notionQueryDatabase(MEMBER_DB, { filter: { property: MEMBER_EMAIL_PROP, title: { equals: email } }, page_size: 1 });
+  if (!r?.results?.length) return false;
+
+  const page = r.results[0];
+  const pageId = page.id;
+  const props  = page.properties || {};
+  const existing = (props[MEMBER_LINE_PROP]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
+  if (existing) return existing === userId;
+
+  return await notionPatchPage(pageId, { properties: { [MEMBER_LINE_PROP]: { rich_text: [{ text: { content: userId } }] } } });
+}
+
+/* ========= Notion HTTP ========= */
+async function notionQueryDatabase(dbId, body) {
+  const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body || {}),
+  });
+  try { return await r.json(); } catch { return {}; }
+}
+
+async function notionPatchPage(pageId, data) {
+  const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    method: "PATCH",
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data || {}),
+  });
+  if (!r.ok) console.error("[notionPatchPage]", r.status, await safeText(r));
+  return r.ok;
+}
+
+async function notionCreatePage(dbId, properties) {
+  const r = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ parent: { database_id: dbId }, properties }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) console.error("[notionCreatePage]", r.status, j);
+  return { ok: r.ok, json: j, status: r.status };
+}
+
+async function notionGetPage(pageId) {
+  const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    method: "GET",
+    headers: {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Notion-Version": NOTION_VER,
+      "Content-Type": "application/json",
+    },
+  });
+  try { return await r.json(); } catch { return {}; }
+}
+
+/* ========= 文字處理 / Flex ========= */
 function coerceList(ans) {
   if (Array.isArray(ans?.results)) return ans.results;
   if (Array.isArray(ans?.items))   return ans.items;
   return ans?.answer ? [ans.answer] : [];
 }
 
-function formatSymptomsMessage(query, items, showN=3){
+function getField(obj, keys) { if (!obj) return ""; for (const k of keys) if (obj[k]) return String(obj[k]); return ""; }
+
+function formatSymptomsMessage(query, items, showN = 3) {
   const arr = items || [];
   const shown = arr.slice(0, showN);
   const moreCount = Math.max(0, arr.length - shown.length);
 
-  if (!shown.length) {
-    return { text: notFoundMessage(query), moreCount: 0 };
-  }
+  if (!shown.length) return { text: notFoundMessage(query), moreCount: 0 };
 
   const lines = [`🔎 查詢：「${query}」`];
   shown.forEach((it, idx) => {
@@ -297,11 +536,9 @@ function formatSymptomsMessage(query, items, showN=3){
   return { text: lines.join("\n"), moreCount };
 }
 
-function formatSymptomsAll(query, items, limit=50){
+function formatSymptomsAll(query, items, limit = 50) {
   const arr = (items || []).slice(0, limit);
-  if (!arr.length){
-    return notFoundMessage(query);
-  }
+  if (!arr.length) return notFoundMessage(query);
 
   const lines = [`🔎 查詢：「${query}」`];
   arr.forEach((it, idx) => {
@@ -325,192 +562,6 @@ function formatSymptomsAll(query, items, limit=50){
   return lines.join("\n");
 }
 
-function getField(obj, keys){ if (!obj) return ""; for (const k of keys) if (obj[k]) return String(obj[k]); return ""; }
-
-/* ====== 會員狀態守門 ====== */
-async function ensureMemberAllowed(userId){
-  const info = await getMemberInfoByLineId(userId);
-  if (!info || !isEmail(info.email)) {
-    return { ok:false, email:"", hint:"尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com" };
-  }
-  const statusName = String(info.status || "").trim();
-  if (statusName && BLOCK_STATUS_NAMES.includes(statusName)) {
-    return { ok:false, email:info.email, hint:`此帳號狀態為「${statusName}」，暫停使用查詢/簽到/心得功能。` };
-  }
-  if (CHECK_EXPIRE && info.expire) {
-    const expDate = new Date(info.expire);
-    const today = new Date(new Date().toDateString());
-    if (String(expDate) !== "Invalid Date" && expDate < today) {
-      return { ok:false, email:info.email, hint:`此帳號已過有效日期（${fmtDate(info.expire)}）。` };
-    }
-  }
-  return { ok:true, email:info.email, status:info.status, expire:info.expire };
-}
-
-async function getMemberInfoByLineId(userId){
-  if (!MEMBER_DB || !userId) return null;
-  const r = await notionQueryDatabase(MEMBER_DB, {
-    filter: { property: MEMBER_LINE_PROP, rich_text: { equals: userId } }, page_size: 1
-  });
-  if (!r?.results?.length) return null;
-  const p = r.results[0]?.properties || {};
-  const email  = readPropEmail(p, MEMBER_EMAIL_PROP);
-  const status = p[MEMBER_STATUS_PROP]?.select?.name || "";
-  const level  = p[MEMBER_LEVEL_PROP]?.select?.name || "";
-  const expire = p[MEMBER_EXPIRE_PROP]?.date?.start || "";
-  const lineBind = (p[MEMBER_LINE_PROP]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
-  return { email, status, level, expire, lineBind };
-}
-
-async function bindEmailToLine(userId, email){
-  if (!MEMBER_DB || !userId || !isEmail(email)) return false;
-  let r = await notionQueryDatabase(MEMBER_DB, { filter: { property: MEMBER_EMAIL_PROP, email: { equals: email } }, page_size: 1 });
-  if (!r?.results?.length) r = await notionQueryDatabase(MEMBER_DB, { filter: { property: MEMBER_EMAIL_PROP, rich_text: { equals: email } }, page_size: 1 });
-  if (!r?.results?.length) r = await notionQueryDatabase(MEMBER_DB, { filter: { property: MEMBER_EMAIL_PROP, title: { equals: email } }, page_size: 1 });
-  if (!r?.results?.length) return false;
-
-  const page = r.results[0];
-  const pageId = page.id;
-  const props  = page.properties || {};
-  const existing = (props[MEMBER_LINE_PROP]?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
-  if (existing) return existing === userId;
-
-  return await notionPatchPage(pageId, { properties: { [MEMBER_LINE_PROP]: { rich_text: [{ text: { content: userId } }] } } });
-}
-
-/* ====== Notion 共用 ====== */
-async function notionQueryDatabase(dbId, body){
-  const r = await fetch("https://api.notion.com/v1/databases/" + dbId + "/query", {
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + NOTION_KEY,
-      "Notion-Version": NOTION_VER,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body || {})
-  });
-  try { return await r.json(); } catch { return {}; }
-}
-async function notionPatchPage(pageId, data){
-  const r = await fetch("https://api.notion.com/v1/pages/" + pageId, {
-    method: "PATCH",
-    headers: {
-      "Authorization": "Bearer " + NOTION_KEY,
-      "Notion-Version": NOTION_VER,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(data || {})
-  });
-  if (!r.ok) console.error("[notionPatchPage]", r.status, await safeText(r));
-  return r.ok;
-}
-async function notionCreatePage(dbId, properties){
-  const r = await fetch("https://api.notion.com/v1/pages", {
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + NOTION_KEY,
-      "Notion-Version": NOTION_VER,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ parent: { database_id: dbId }, properties })
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) console.error("[notionCreatePage]", r.status, j);
-  return { ok: r.ok, json: j, status: r.status };
-}
-
-/* ====== 紀錄 DB 寫入／回填 ====== */
-async function writeRecord({ email, userId, category, content }){
-  const nowISO = new Date().toISOString();
-  const nowTW  = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
-  const props = {
-    [REC_TITLE]: { title: [{ text: { content: `${category}｜${nowTW}` } }] },
-    [REC_EMAIL]: { email },
-    [REC_UID]:   { rich_text: [{ text: { content: userId } }] },
-    [REC_CATE]:  { select: { name: category } },
-    [REC_BODY]:  { rich_text: [{ text: { content } }] },
-    [REC_DATE]:  { date: { start: nowISO } },
-    [REC_SRC]:   { rich_text: [{ text: { content: "LINE" } }] }
-  };
-  const { ok, json } = await notionCreatePage(RECORD_DB, props);
-  if (!ok) console.error("[writeRecord] create failed", json);
-  return json?.id || "";
-}
-
-async function patchRecordById(pageId, { seg, tip }){
-  if (!pageId) return;
-  const page = await notionGetPage(pageId);
-  const propsNow = page?.properties || {};
-  const outProps = {};
-  if (typeof seg !== "undefined" && propsNow[REC_SEG]) outProps[REC_SEG] = buildPropValueByType(propsNow[REC_SEG], seg ?? "");
-  if (typeof tip !== "undefined" && propsNow[REC_AI])  outProps[REC_AI]  = buildPropValueByType(propsNow[REC_AI],  tip ?? "");
-  const keys = Object.keys(outProps);
-  if (!keys.length) { console.warn("[patchRecordById] no matched properties to update"); return; }
-  const ok = await notionPatchPage(pageId, { properties: outProps });
-  if (!ok) console.error("[patchRecordById] failed", outProps);
-}
-
-/* ====== Notion 輔助 ====== */
-async function notionGetPage(pageId){
-  const r = await fetch("https://api.notion.com/v1/pages/" + pageId, {
-    method: "GET",
-    headers: {
-      "Authorization": "Bearer " + NOTION_KEY,
-      "Notion-Version": NOTION_VER,
-      "Content-Type": "application/json"
-    }
-  });
-  try { return await r.json(); } catch { return {}; }
-}
-function buildPropValueByType(propItem, value){
-  const text = String(value ?? "").slice(0, 1900);
-  if (!propItem || !propItem.type) return { rich_text: [{ text: { content: text } }] };
-  switch (propItem.type) {
-    case "title":        return { title: [{ text: { content: text } }] };
-    case "rich_text":    return { rich_text: [{ text: { content: text } }] };
-    case "select":       return { select: { name: (text.split(/[、,，\s]/).filter(Boolean)[0] || text || "—") } };
-    case "multi_select": return { multi_select: text.split(/[、,，\s]/).filter(Boolean).slice(0,20).map(n => ({ name:n })) };
-    default:             return { rich_text: [{ text: { content: text } }] };
-  }
-}
-
-/* ====== LINE 回覆 ====== */
-async function replyText(replyToken, text){
-  if (!LINE_TOKEN) { console.warn("[replyText] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
-  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
-    body: JSON.stringify({ replyToken, messages: [{ type: "text", text: String(text||"").slice(0, 4900) }] })
-  });
-  if (!r.ok) console.error("[replyText]", r.status, await safeText(r));
-}
-async function replyTextQR(replyToken, text, quickList=[]){
-  if (!LINE_TOKEN) { console.warn("[replyTextQR] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
-  const items = (quickList||[]).map(q => ({ type:"action", action:{ type:"message", label:q.label, text:q.text }})).slice(0,12);
-  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
-    body: JSON.stringify({ replyToken, messages: [{ type:"text", text:String(text||"").slice(0,4900), quickReply: items.length?{ items }:undefined }] })
-  });
-  if (!r.ok) console.error("[replyTextQR]", r.status, await safeText(r));
-}
-
-// ===== LINE Flex 回覆（表格樣式） =====
-async function replyFlex(replyToken, flex) {
-  if (!LINE_TOKEN) { console.warn("[replyFlex] missing LINE_CHANNEL_ACCESS_TOKEN"); return false; }
-  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
-    body: JSON.stringify({
-      replyToken,
-      messages: [{ type: "flex", altText: "查詢結果", contents: flex }]
-    })
-  });
-  if (!r.ok) { console.error("[replyFlex]", r.status, await safeText(r)); return false; }
-  return true;
-}
-
-// ===== 症狀結果 → Flex 表格 =====
 function buildTableRow(label, value) {
   return {
     type: "box", layout: "baseline", spacing: "sm",
@@ -523,7 +574,7 @@ function buildTableRow(label, value) {
 
 function itemToFlexBubble(item, title) {
   const q    = getField(item, ["question","問題","query"]) || "—";
-  const key1 = getField(item, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—"; // 教材重點=教材版回覆
+  const key1 = getField(item, ["教材版回覆","教材重點","臨床流程建議","tips","summary","reply"]) || "—";
   const seg  = getField(item, ["對應脊椎分節","segments","segment"]) || "—";
   const flow = getField(item, ["臨床流程建議","flow","process"]) || "—";
   const mer  = getField(item, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
@@ -531,10 +582,7 @@ function itemToFlexBubble(item, title) {
 
   return {
     type: "bubble",
-    header: {
-      type: "box", layout: "vertical",
-      contents: [{ type: "text", text: String(title).slice(0, 36), weight: "bold", size: "md" }]
-    },
+    header: { type: "box", layout: "vertical", contents: [{ type: "text", text: String(title).slice(0, 36), weight: "bold", size: "md" }] },
     body: {
       type: "box", layout: "vertical", spacing: "sm",
       contents: [
@@ -543,30 +591,50 @@ function itemToFlexBubble(item, title) {
         buildTableRow("對應脊椎分節", seg),
         buildTableRow("臨床流程建議", flow),
         buildTableRow("經絡與補充", mer),
-        buildTableRow("AI回覆", ai)
+        buildTableRow("AI回覆", ai),
       ]
     }
   };
 }
 
-function itemsToFlexCarousel(items, titlePrefix="查詢") {
-  const arr = (items || []).slice(0, 10); // LINE 最多10個 bubble
-  const bubbles = arr.map((it, idx) => itemToFlexBubble(it, `${titlePrefix} #${idx+1}`));
-  if (bubbles.length === 1) return bubbles[0]; // 單張 bubble
+function itemsToFlexCarousel(items, titlePrefix = "查詢") {
+  const arr = (items || []).slice(0, 10);
+  const bubbles = arr.map((it, idx) => itemToFlexBubble(it, `${titlePrefix} #${idx + 1}`));
+  if (bubbles.length === 1) return bubbles[0];
   return { type: "carousel", contents: bubbles };
 }
 
-/* ====== HTTP / 其他 ====== */
-async function postJSON(url, body, timeoutMs=15000){
+/* ========= HTTP / 其他 ========= */
+function verifyLineSignature(req, secret) {
+  const sig = req.headers["x-line-signature"];
+  if (!sig) return false;
+  const body = JSON.stringify(req.body);
+  const hash = crypto.createHmac("sha256", secret).update(body).digest("base64");
+  return hash === sig;
+}
+
+async function postJSON(url, body, timeoutMs = 15000) {
   const ac = new AbortController(); const id = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json", "Accept":"application/json" }, body:JSON.stringify(body||{}), signal:ac.signal });
-    const txt = await r.text(); let json; try { json = JSON.parse(txt); } catch { json = { raw: txt }; } json.http = r.status; return json;
-  } catch (e) { console.error("[postJSON]", e?.message || e); return { ok:false, error:e?.message || "fetch_failed" }; }
-  finally { clearTimeout(id); }
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(body || {}),
+      signal: ac.signal,
+    });
+    const txt = await r.text();
+    let json; try { json = JSON.parse(txt); } catch { json = { raw: txt }; }
+    json.http = r.status;
+    return json;
+  } catch (e) {
+    console.error("[postJSON]", e?.message || e);
+    return { ok: false, error: e?.message || "fetch_failed" };
+  } finally { clearTimeout(id); }
 }
-async function safeText(res){ try { return await res.text(); } catch { return ""; } }
-function readPropEmail(props, key){
+
+async function safeText(res) { try { return await res.text(); } catch { return ""; } }
+
+function readPropEmail(props, key) {
   if (!props || !key || !props[key]) return "";
   const e1 = props[key]?.email || ""; if (e1 && isEmail(e1)) return e1.trim();
   const e2 = (props[key]?.rich_text || []).map(t => t?.plain_text || "").join("").trim(); if (e2 && isEmail(e2)) return e2;
@@ -574,148 +642,45 @@ function readPropEmail(props, key){
   return "";
 }
 
-/* ====== 說明 ====== */
-function helpText(){
+/* ========= LINE 回覆 ========= */
+async function replyText(replyToken, text) {
+  if (!LINE_TOKEN) { console.warn("[replyText] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
+  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
+    body: JSON.stringify({ replyToken, messages: [{ type: "text", text: String(text || "").slice(0, 4900) }] })
+  });
+  if (!r.ok) console.error("[replyText]", r.status, await safeText(r));
+}
+
+async function replyTextQR(replyToken, text, quickList = []) {
+  if (!LINE_TOKEN) { console.warn("[replyTextQR] missing LINE_CHANNEL_ACCESS_TOKEN"); return; }
+  const items = (quickList || []).map(q => ({ type: "action", action: { type: "message", label: q.label, text: q.text } })).slice(0, 12);
+  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + LINE_TOKEN },
+    body: JSON.stringify({ replyToken, messages: [{ type: "text", text: String(text || "").slice(0, 4900), quickReply: items.length ? { items } : undefined }] })
+  });
+  if (!r.ok) console.error("[replyTextQR]", r.status, await safeText(r));
+}
+
+/* ========= 說明 ========= */
+function helpText() {
   return [
     "可用指令：",
     "• 綁定 your@email.com",
     "• 狀態 / 我的狀態",
     "• 簽到 [內容]",
     "• 心得 你的心得……",
-    "• 主題 基礎理論  （或直接輸入：基礎理論）",
+    "• 主題 基礎理論（或直接輸入：基礎理論）",
     "• 顯示全部 主題 基礎理論",
+    "• 文案 你的主題（AI 產文）",
     "• 直接輸入症狀關鍵字（例：肩頸、頭暈、胸悶）"
   ].join("\n");
 }
-function fmtDate(iso){ try{ const d=new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}catch{return iso;} }
-function shortId(id){ return id ? id.replace(/-/g,"").slice(0,8) : ""; }
 
-
-// 可用於 Node 18+ / Vercel
-import crypto from "crypto";
-import OpenAI from "openai";
-
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const OPENAI_MODEL = "gpt-4o-mini";
-
-const NOTION_API_KEY = process.env.NOTION_API_KEY;
-const RECORD_DB_ID   = process.env.RECORD_DB_ID;
-
-// === 依你的 Notion 欄位名稱做 mapping（勿改左側，右側改成你表的名字即可）===
-const COL = {
-  title: "標題",
-  email: "Email",
-  userId: "UserId",
-  category: "類別",
-  content: "內容",
-  date: "日期",
-  source: "來源",
-  aiAnswer: "AI回覆",
-  // 其他欄位（對應脊…）本功能不寫入，所以先不列
-};
-
-// 驗簽（可選；若你還沒啟用 LINE_CHANNEL_SECRET，可以暫時回傳 true）
-function verifyLineSignature(req) {
-  const secret = process.env.LINE_CHANNEL_SECRET;
-  if (!secret) return true;
-  const signature = req.headers["x-line-signature"];
-  const body = JSON.stringify(req.body);
-  const hash = crypto.createHmac("sha256", secret).update(body).digest("base64");
-  return hash === signature;
+function fmtDate(iso) {
+  try { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+  catch { return iso; }
 }
-
-async function createNotionRecord({ title, email, userId, category, content, dateISO, source, aiText }) {
-  const props = {};
-  props[COL.title]    = { title: [{ type: "text", text: { content: title || "AI 產文紀錄" } }] };
-  if (COL.email)   props[COL.email]   = { rich_text: [{ text: { content: email || "" } }] }; // 若 Email 欄位型別是 Email，也可用 { email: email || "" }
-  if (COL.userId)  props[COL.userId]  = { rich_text: [{ text: { content: userId || "" } }] };
-  if (COL.category)props[COL.category]= { select: { name: category || "AI產文" } };
-  if (COL.content) props[COL.content] = { rich_text: [{ text: { content } }] };
-  if (COL.date)    props[COL.date]    = { date: { start: dateISO } };
-  if (COL.source)  props[COL.source]  = { select: { name: source || "LINE" } };
-  if (COL.aiAnswer)props[COL.aiAnswer]= { rich_text: [{ text: { content: aiText || "" } }] };
-
-  const res = await fetch("https://api.notion.com/v1/pages", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${NOTION_API_KEY}`,
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ parent: { database_id: RECORD_DB_ID }, properties: props }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    console.error("[Notion] create failed:", data);
-    throw new Error(data?.message || `HTTP ${res.status}`);
-  }
-  return data;
-}
-
-function buildMarketingMessages(userText) {
-  return [
-    {
-      role: "system",
-      content:
-        "你是一位溫柔、療癒、可信任的台灣在地行銷文案助手。請以 50–80 字撰寫貼文開頭，避免醫療/療效承諾字眼，最後加 2–4 個 hashtag（繁體）。",
-    },
-    { role: "user", content: userText },
-  ];
-}
-
-export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
-    if (!verifyLineSignature(req)) return res.status(403).send("Invalid signature");
-
-    // 兼容：LINE Webhook 或 直接 JSON 測試
-    let text = "", userId = "", source = "API";
-    if (req.body?.events?.[0]) {
-      const ev = req.body.events[0];
-      text = ev.message?.text || "";
-      userId = ev.source?.userId || "";
-      source = "LINE";
-    } else {
-      text = req.body?.text || "";
-      userId = req.body?.userId || "";
-      source = "API";
-    }
-
-    // 觸發詞：「文案 」開頭（例：文案 幫我寫臉部課程開頭）
-    const trigger = /^文案[\s：:]/;
-    if (!trigger.test(text)) {
-      return res.status(200).json({ ok: true, message: "未觸發產文（請用：文案 你的主題）" });
-    }
-    const userTopic = text.replace(trigger, "").trim();
-    if (!userTopic) return res.status(200).json({ ok: false, message: "請在『文案 』後輸入主題" });
-
-    // 呼叫 OpenAI
-    const completion = await client.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: buildMarketingMessages(userTopic),
-      temperature: 0.7,
-    });
-    const aiText = completion.choices?.[0]?.message?.content?.trim() || "";
-
-    // 寫回你這張「不老會員紀錄DB」
-    const nowISO = new Date().toISOString();
-    await createNotionRecord({
-      title: `行銷文案｜${userTopic.slice(0, 30)}`,
-      email: "",                // 若你在 LINE 流程可抓到 Email 再塞；目前先留空
-      userId,
-      category: "AI產文",
-      content: userTopic,
-      dateISO: nowISO,
-      source,                   // LINE / API
-      aiText,
-    });
-
-    // 回覆
-    return res.status(200).json({ ok: true, answer: aiText });
-  } catch (err) {
-    console.error("[AI 文案] 失敗：", err?.message);
-    // 不中斷地回應
-    return res.status(500).json({ ok: false, error: err?.message || "internal error" });
-  }
-}
-
+function shortId(id) { return id ? id.replace(/-/g, "").slice(0, 8) : ""; }
