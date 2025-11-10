@@ -1,5 +1,5 @@
 // api/line-webhook.js
-// 功能：綁定 Email、查會員狀態、簽到、心得、主題查詢（Notion QA_DB）、症狀查詢（ANSWER_URL）
+// 功能：綁定 Email、查會員狀態、簽到、心得、主題查詢（Notion QA_DB）、症狀查詢（ANSWER_URL）、IG開頭文案產生（OpenAI）
 // 規則：顯示「教材重點」→ 一律取 Notion 欄位《教材版回覆》
 // 守門：會員狀態=停用/封鎖/過期 → 禁用簽到/心得/查詢
 
@@ -11,6 +11,7 @@ const RECORD_DB  = process.env.RECORD_DB_ID || "";
 const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || ""; // 不老資料庫
 const NOTION_VER = "2022-06-28";
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ""; // ← 新增：OpenAI 金鑰
 
 /* ====== 會員 DB 欄位 ====== */
 const MEMBER_EMAIL_PROP  = "Email";
@@ -152,6 +153,47 @@ async function handleEvent(ev){
     if (!content) { await replyText(replyToken, "請在「心得」後面接文字，例如：心得 今天的頸胸交界手感更清楚了"); return; }
     const pageId = await writeRecord({ email: gate.email, userId, category:"心得", content });
     await replyText(replyToken, `📝 已寫入心得！\n${content}\n(記錄ID: ${shortId(pageId)})`);
+    return;
+  }
+
+  // ===== OpenAI 產文：文案 XXX =====
+  if (/^文案(?:\s|$)/.test(text)) {
+    const gate = await ensureMemberAllowed(userId);
+    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+
+    const topic = normalizeText(text.replace(/^文案(?:\s|$)/, ""));
+    if (!topic) { await replyText(replyToken, "請在「文案」後面接主題，例如：文案 Lifewave X39 逆齡保養開頭文案"); return; }
+
+    try {
+      // 1) 呼叫 OpenAI 產文
+      const { answer, latency_ms } = await generateCopyText(topic);
+      if (!answer) { await replyText(replyToken, "產文失敗，請稍後再試。"); return; }
+
+      // 2) 紀錄 DB：新增頁面
+      const pageId = await writeRecord({
+        email: gate.email,
+        userId,
+        category: "AI產文",
+        content: topic,
+        source: "API" // 可改回 "LINE" 依你需求
+      });
+
+      // 3) 回填《AI回覆》
+      await patchRecordById(pageId, { tip: answer, seg: undefined });
+
+      // 4) 回覆使用者（純文字；要做 Flex 也可）
+      const msg = [
+        "🪄 IG 開頭文案已生成：",
+        "",
+        answer,
+        "",
+        `（延遲 ${latency_ms} ms）`
+      ].join("\n");
+      await replyText(replyToken, msg);
+    } catch (e) {
+      console.error("[copy_gen_error]", e);
+      await replyText(replyToken, "產文服務目前暫時無法使用，請稍後再試。");
+    }
     return;
   }
 
@@ -431,7 +473,7 @@ async function notionCreatePage(dbId, properties){
 }
 
 /* ====== 紀錄 DB 寫入／回填 ====== */
-async function writeRecord({ email, userId, category, content }){
+async function writeRecord({ email, userId, category, content, source="LINE" }){
   const nowISO = new Date().toISOString();
   const nowTW  = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
   const props = {
@@ -441,7 +483,7 @@ async function writeRecord({ email, userId, category, content }){
     [REC_CATE]:  { select: { name: category } },
     [REC_BODY]:  { rich_text: [{ text: { content } }] },
     [REC_DATE]:  { date: { start: nowISO } },
-    [REC_SRC]:   { rich_text: [{ text: { content: "LINE" } }] }
+    [REC_SRC]:   { rich_text: [{ text: { content: source } }] } // 若你的「來源」是 Select，改成：select: { name: source }
   };
   const { ok, json } = await notionCreatePage(RECORD_DB, props);
   if (!ok) console.error("[writeRecord] create failed", json);
@@ -479,6 +521,35 @@ function buildPropValueByType(propItem, value){
     case "multi_select": return { multi_select: text.split(/[、,，\s]/).filter(Boolean).slice(0,20).map(n => ({ name:n })) };
     default:             return { rich_text: [{ text: { content: text } }] };
   }
+}
+
+/* ====== OpenAI（產 IG 開頭文案） ====== */
+async function getOpenAIClient(){
+  if (!OPENAI_API_KEY) throw new Error("缺少 OPENAI_API_KEY");
+  const { default: OpenAI } = await import("openai");
+  return new OpenAI({ apiKey: OPENAI_API_KEY });
+}
+function buildCopyPrompt(userTopic){
+  return [
+    {
+      role: "system",
+      content: "你是一位溫柔、療癒、可信任的台灣行銷文案助手，請用 50–80 字寫 IG 貼文開頭，避免醫療/療效承諾字眼，結尾加 2–4 個 hashtag（繁體）。"
+    },
+    { role: "user", content: String(userTopic || "").trim() }
+  ];
+}
+async function generateCopyText(topic){
+  const client = await getOpenAIClient();
+  const started = Date.now();
+  const completion = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: buildCopyPrompt(topic),
+    temperature: 0.7
+  });
+  const answer = completion?.choices?.[0]?.message?.content?.trim() || "";
+  const latency = Date.now() - started;
+  const tokens = completion?.usage || { prompt_tokens:0, completion_tokens:0, total_tokens:0 };
+  return { answer, latency_ms: latency, tokens };
 }
 
 /* ====== Flex 卡片（症狀/主題通用） ====== */
@@ -610,6 +681,7 @@ function helpText(){
     "• 狀態 / 我的狀態",
     "• 簽到 [內容]",
     "• 心得 你的心得……",
+    "• 文案 你的主題（自動生 IG 開頭）",
     "• 主題 基礎理論  （或直接輸入：基礎理論）",
     "• 顯示全部 主題 基礎理論",
     "• 直接輸入症狀關鍵字（例：肩頸、頭暈、胸悶）"
