@@ -18,16 +18,33 @@ const COL = {
   aiAnswer: "AI回覆",
 };
 
+// ✅ 對應：Email=Email 型別、來源=Select 型別
 async function writeNotion({ title, email, userId, content, aiText, source }) {
   const props = {};
-  props[COL.title]    = { title: [{ type: "text", text: { content: title } }] };
-  if (COL.email)   props[COL.email]   = { rich_text: [{ text: { content: email || "" } }] }; // 若是 Email 型別可改 { email: email || "" }
+
+  // 標題（Title）
+  props[COL.title] = {
+    title: [{ type: "text", text: { content: title || "AI 產文紀錄" } }],
+  };
+
+  // Email（Email 型別 → 用 { email }）
+  if (COL.email && email) {
+    props[COL.email] = { email };
+  }
+
+  // UserId / 內容 / AI回覆（Rich text）
   if (COL.userId)  props[COL.userId]  = { rich_text: [{ text: { content: userId || "" } }] };
-  if (COL.category)props[COL.category]= { select: { name: "AI產文" } }; // 先在 Notion 建好此選項
-  if (COL.content) props[COL.content] = { rich_text: [{ text: { content } }] };
-  if (COL.date)    props[COL.date]    = { date: { start: new Date().toISOString() } };
-  if (COL.source)  props[COL.source]  = { select: { name: source || "API" } };
-  if (COL.aiAnswer)props[COL.aiAnswer]= { rich_text: [{ text: { content: aiText } }] };
+  if (COL.content) props[COL.content] = { rich_text: [{ text: { content: content || "" } }] };
+  if (COL.aiAnswer)props[COL.aiAnswer]= { rich_text: [{ text: { content: aiText || "" } }] };
+
+  // 類別（Select）→ 先在 Notion 建好「AI產文」選項
+  if (COL.category) props[COL.category] = { select: { name: "AI產文" } };
+
+  // 日期（Date）
+  if (COL.date) props[COL.date] = { date: { start: new Date().toISOString() } };
+
+  // 來源（Select）→ 你的表是 Select，所以保持 select
+  if (COL.source) props[COL.source] = { select: { name: source || "API" } };
 
   const r = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
@@ -36,23 +53,17 @@ async function writeNotion({ title, email, userId, content, aiText, source }) {
       "Notion-Version": "2022-06-28",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ parent: { database_id: RECORD_DB_ID }, properties: props }),
+    body: JSON.stringify({
+      parent: { database_id: RECORD_DB_ID },
+      properties: props,
+    }),
   });
+
   const data = await r.json();
   if (!r.ok) throw new Error(`[Notion] ${data?.message || r.status}`);
   return data;
 }
 
-function prompt(userTopic) {
-  return [
-    {
-      role: "system",
-      content:
-        "你是一位溫柔、療癒、可信任的台灣行銷文案助手，請用 50–80 字寫 IG 貼文開頭，避免醫療/療效承諾字眼，結尾加 2–4 個 hashtag（繁體）。",
-    },
-    { role: "user", content: userTopic },
-  ];
-}
 
 export default async function handler(req, res) {
   try {
