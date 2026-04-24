@@ -417,7 +417,12 @@ async function queryQaByTopic(topic, limit = 10) {
   if (!QA_DB_ID || !topic) return [];
 
   const r = await notionQueryDatabase(QA_DB_ID, {
-    filter: { property: QA_TOPIC, select: { equals: topic } },
+    filter: {
+      and: [
+        { property: QA_TOPIC, select: { equals: topic } },
+        { property: "是否啟用", checkbox: { equals: true } }
+      ]
+    },
     sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
     page_size: limit
   });
