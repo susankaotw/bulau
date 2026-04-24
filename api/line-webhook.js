@@ -77,10 +77,8 @@ async function handleEvent(ev){
     const gate = await ensureMemberAllowed(userId);
     if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
-    // 先回 Loading
     await replyLoading(replyToken, `「${query}」資料彙整中…`);
 
-    // 「顯示全部 主題 基礎理論」→ 主題查詢
     const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(query);
     if (mTopic) {
       const topic = normalizeText(mTopic[1]);
@@ -96,7 +94,6 @@ async function handleEvent(ev){
       return;
     }
 
-    // 其餘 → 症狀（ANSWER_URL）
     const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 20000);
     const list = coerceList(ans);
     try {
@@ -110,10 +107,8 @@ async function handleEvent(ev){
     return;
   }
 
-  // help
   if (/^(help|幫助|\?|指令)$/i.test(text)) { await replyText(replyToken, helpText()); return; }
 
-  // 綁定
   if (/^綁定\s+/i.test(text) || isEmail(text)) {
     let email = text;
     if (/^綁定\s+/i.test(email)) email = normalizeText(email.replace(/^綁定\s+/i, ""));
@@ -126,7 +121,6 @@ async function handleEvent(ev){
     return;
   }
 
-  // 狀態
   if (/^(我的)?狀態$/i.test(text)) {
     const info = await getMemberInfoByLineId(userId);
     if (!info) { await replyText(replyToken, "尚未綁定 Email。請輸入：綁定 your@email.com"); return; }
@@ -137,7 +131,6 @@ async function handleEvent(ev){
     return;
   }
 
-  // 簽到
   if (/^(簽到|打卡)(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
     if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
@@ -147,7 +140,6 @@ async function handleEvent(ev){
     return;
   }
 
-  // 心得
   if (/^心得(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
     if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
@@ -158,7 +150,6 @@ async function handleEvent(ev){
     return;
   }
 
-  // ===== OpenAI 產文：文案 XXX =====
   if (/^文案(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
     if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
@@ -166,7 +157,6 @@ async function handleEvent(ev){
     const topic = normalizeText(text.replace(/^文案(?:\s|$)/, ""));
     if (!topic) { await replyText(replyToken, "請在「文案」後面接主題，例如：文案 Lifewave X39 逆齡保養開頭文案"); return; }
 
-    // Loading
     await replyLoading(replyToken, `「${topic}」文案生成中…`);
 
     try {
@@ -191,7 +181,6 @@ async function handleEvent(ev){
     return;
   }
 
-  // ===== 主題查詢（明確 or 猜測） =====
   const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(text);
   if (mTopic) {
     const topic = normalizeText(mTopic[1]);
@@ -206,26 +195,21 @@ async function handleEvent(ev){
     }
   }
 
-  // ===== 其餘 → 症狀關鍵字查詢（ANSWER_URL）=====
   const gate = await ensureMemberAllowed(userId);
   if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
   const pageId = await writeRecord({ email: gate.email, userId, category:"症狀查詢", content:text });
 
-  // 先回 Loading
   await replyLoading(replyToken, `「${text}」查詢中，請稍候…`);
 
-  // 外部查詢
   const ans  = await postJSON(ANSWER_URL, { q:text, question:text, email: gate.email }, 20000);
   const list = coerceList(ans);
 
-  // 回填第一筆（seg / 教材重點=教材版回覆）
   const first    = list[0] || ans?.answer || {};
   const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
   const tipFirst = getField(first, ["教材版回覆","教材重點","tips","summary","reply"]) || "";
   await patchRecordById(pageId, { seg: segFirst, tip: tipFirst });
 
-  // Push 結果（Flex 為主，文字備援）
   try {
     const flex = buildSymptomsCarousel(text, list, 3);
     await pushFlex(userId, `查詢：「${text}」`, flex);
@@ -243,7 +227,6 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   const gate = await ensureMemberAllowed(userId);
   if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
 
-  // 先回 Loading
   await replyLoading(replyToken, `主題「${topic}」查詢中…`);
 
   const pageId = await writeRecord({ email: gate.email, userId, category:"症狀查詢", content:`主題 ${topic}` });
@@ -284,9 +267,10 @@ function pageToItem(page){
   return {
     問題: tText(p[QA_QUESTION]) || rText(p[QA_QUESTION]) || "",
     主題:  p[QA_TOPIC]?.select?.name || "",
+    類型:  p["類型"]?.select?.name || p[QA_TOPIC]?.select?.name || "主題查詢",
     對應脊椎分節: rText(p[QA_SEGMENT]) || "",
     教材版回覆: rText(p[QA_REPLY]) || "",
-    教材重點: rText(p[QA_REPLY]) || "",   // 相容鍵名（同等於教材版回覆）
+    教材重點: rText(p[QA_REPLY]) || "",
     臨床流程建議: rText(p[QA_FLOW]) || "",
     經絡與補充: rText(p[QA_MERIDIAN]) || "",
   };
@@ -299,6 +283,12 @@ function coerceList(ans) {
   return ans?.answer ? [ans.answer] : [];
 }
 
+function getCardType(it) {
+  return getField(it, ["類型", "type", "intent", "AI判斷類型"]) ||
+         getField(it, ["主題", "topic"]) ||
+         "查詢結果";
+}
+
 function formatSymptomsMessage(query, items, showN=3){
   const arr = items || [];
   const shown = arr.slice(0, showN);
@@ -307,7 +297,7 @@ function formatSymptomsMessage(query, items, showN=3){
 
   if (!shown.length){
     lines.push(
-      "", "#1 症狀對應",
+      "", "#1 查詢結果",
       "・問題：—",
       "・教材重點：—",
       "・對應脊椎分節：—",
@@ -318,14 +308,15 @@ function formatSymptomsMessage(query, items, showN=3){
     );
   } else {
     shown.forEach((it, idx) => {
+      const cardType = getCardType(it);
       const q    = getField(it, ["question","問題","query"]) || query;
       const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
       const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-      const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
-      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
+      const flow = getField(it, ["臨床流程建議","flow","process","判斷流程"]) || "—";
+      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充","客戶溝通話術"]) || "—";
+      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer","AI教學說法"]) || "—";
       lines.push(
-        `${idx===0 ? "\n" : ""}#${idx+1} 症狀對應`,
+        `${idx===0 ? "\n" : ""}#${idx+1} ${cardType}`,
         `・問題：${q}`,
         `・教材重點：${key1}`,
         `・對應脊椎分節：${seg}`,
@@ -347,7 +338,7 @@ function formatSymptomsAll(query, items, limit=50){
 
   if (!arr.length){
     lines.push(
-      "", "#1 症狀對應",
+      "", "#1 查詢結果",
       "・問題：—",
       "・教材重點：—",
       "・對應脊椎分節：—",
@@ -358,14 +349,15 @@ function formatSymptomsAll(query, items, limit=50){
     );
   } else {
     arr.forEach((it, idx) => {
+      const cardType = getCardType(it);
       const q    = getField(it, ["question","問題","query"]) || query;
       const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
       const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-      const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
-      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
-      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
+      const flow = getField(it, ["臨床流程建議","flow","process","判斷流程"]) || "—";
+      const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充","客戶溝通話術"]) || "—";
+      const ai   = getField(it, ["AI回覆","ai_reply","ai","answer","AI教學說法"]) || "—";
       lines.push(
-        `${idx===0 ? "\n" : ""}#${idx+1} 症狀對應`,
+        `${idx===0 ? "\n" : ""}#${idx+1} ${cardType}`,
         `・問題：${q}`,
         `・教材重點：${key1}`,
         `・對應脊椎分節：${seg}`,
@@ -541,14 +533,20 @@ async function generateCopyText(topic){
   return { answer, latency_ms: latency, tokens };
 }
 
-/* ====== Flex 卡片（症狀/主題通用） ====== */
+/* ====== Flex 卡片（症狀/主題/Router 通用） ====== */
 function buildSymptomBubble(it, idx, queryLabel){
-  const q    = getField(it, ["question","問題","query"]) || queryLabel || "查詢結果";
+  const q = getField(it, ["question","問題","query"]) || queryLabel || "查詢結果";
+
+  const cardType =
+    getField(it, ["類型", "type", "intent", "AI判斷類型"]) ||
+    getField(it, ["主題", "topic"]) ||
+    "查詢結果";
+
   const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
   const seg  = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-  const flow = getField(it, ["臨床流程建議","flow","process"]) || "—";
-  const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充"]) || "—";
-  const ai   = getField(it, ["AI回覆","ai_reply","ai","answer"]) || "—";
+  const flow = getField(it, ["臨床流程建議","flow","process","判斷流程"]) || "—";
+  const mer  = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充","客戶溝通話術"]) || "—";
+  const ai   = getField(it, ["AI回覆","ai_reply","ai","answer","AI教學說法"]) || "—";
 
   const lim = (s, n=180) => String(s||"").length>n ? String(s).slice(0,n-1)+"…" : String(s||"");
 
@@ -560,7 +558,7 @@ function buildSymptomBubble(it, idx, queryLabel){
       layout: "vertical",
       paddingAll: "12px",
       contents: [
-        { type: "text", text: `#${idx+1} 症狀對應`, weight: "bold", size: "sm" },
+        { type: "text", text: `#${idx+1} ${cardType}`, weight: "bold", size: "sm" },
         { type: "text", text: lim(q, 60), wrap: true, size: "md" }
       ]
     },
