@@ -1,6 +1,6 @@
 // api/line-webhook.js
 // 功能：綁定 Email、查會員狀態、簽到、心得、主題查詢、Router查詢、IG開頭文案
-// 升級：查詢紀錄 DB 自動記錄 Router 結果、命中狀態、是否需人工補充
+// 升級：主題查詢若無命中，會自動改走 answer.js V4 Router
 
 /* ====== 環境變數 ====== */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
@@ -41,19 +41,18 @@ const REC_SRC   = "來源";
 const REC_AI    = "AI回覆";
 const REC_SEG   = "對應脊椎分節";
 
-// 新增：養 AI 用欄位
 const REC_AI_TYPE      = "AI判斷類型";
 const REC_HIT          = "是否命中資料";
 const REC_NEED_REVIEW  = "是否需要人工補充";
 const REC_ADD_TO_KB    = "是否納入知識庫";
 const REC_RISK         = "風險標記";
-const REC_MATCHED_KB   = "命中知識庫";
+const REC_MATCHED_KB   = "命中知識庫標題";
 const REC_ADMIN_NOTE   = "管理備註";
 
 /* ====== 小工具 ====== */
 const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
-const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g," ").replace(/\s+/g," "));
+const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g, " ").replace(/\s+/g, " "));
 
 /* ====== 入口 ====== */
 module.exports = async (req, res) => {
@@ -70,15 +69,15 @@ module.exports = async (req, res) => {
       }
     }
 
-    res.status(200).json({ ok:true });
+    res.status(200).json({ ok: true });
   } catch (e) {
     console.error("[handler_crash]", e);
-    res.status(200).json({ ok:false, error:e?.message || "unknown_error" });
+    res.status(200).json({ ok: false, error: e?.message || "unknown_error" });
   }
 };
 
 /* ====== 主流程 ====== */
-async function handleEvent(ev){
+async function handleEvent(ev) {
   if (ev.type !== "message" || ev.message?.type !== "text") return;
 
   const text = normalizeText(ev.message.text);
@@ -90,7 +89,10 @@ async function handleEvent(ev){
   if (mShowAll) {
     const query = normalizeText(mShowAll[2] || "");
     const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+    if (!gate.ok) {
+      await replyText(replyToken, gate.hint);
+      return;
+    }
 
     await replyLoading(replyToken, `「${query}」資料彙整中…`);
 
@@ -99,22 +101,35 @@ async function handleEvent(ev){
       const topic = normalizeText(mTopic[1]);
       const list = await queryQaByTopic(topic, 50);
 
+      if (list.length > 0) {
+        try {
+          const flex = buildSymptomsCarousel(`主題：${topic}`, list, Math.min(12, list.length || 1));
+          await pushFlex(userId, `主題：${topic}（全部）`, flex);
+        } catch (e) {
+          console.error("[showall_topic_flex_fallback]", e);
+          const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
+          await pushText(userId, msg);
+        }
+        return;
+      }
+
+      const ans = await postJSON(ANSWER_URL, { q: topic, question: topic, email: gate.email }, 20000);
+      const routerList = coerceList(ans);
       try {
-        const flex = buildSymptomsCarousel(`主題：${topic}`, list, Math.min(12, (list||[]).length || 1));
-        await pushFlex(userId, `主題：${topic}（全部）`, flex);
+        const flex = buildSymptomsCarousel(topic, routerList, Math.min(12, routerList.length || 1));
+        await pushFlex(userId, `查詢：「${topic}」（全部）`, flex);
       } catch (e) {
-        console.error("[showall_topic_flex_fallback]", e);
-        const msg = formatSymptomsAll(`主題：${topic}`, list, 50);
-        await pushText(userId, msg);
+        console.error("[showall_topic_router_fallback]", e);
+        await pushText(userId, formatSymptomsAll(topic, routerList, 50));
       }
       return;
     }
 
-    const ans  = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 20000);
+    const ans = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 20000);
     const list = coerceList(ans);
 
     try {
-      const flex = buildSymptomsCarousel(query, list, Math.min(12, (list||[]).length || 1));
+      const flex = buildSymptomsCarousel(query, list, Math.min(12, list.length || 1));
       await pushFlex(userId, `查詢：「${query}」（全部）`, flex);
     } catch (e) {
       console.error("[showall_symptom_flex_fallback]", e);
@@ -142,9 +157,11 @@ async function handleEvent(ev){
 
     const ok = await bindEmailToLine(userId, email);
 
-    await replyText(replyToken, ok
-      ? `✅ 已綁定 Email：${email}\n之後可直接輸入關鍵字查詢、簽到或寫心得。`
-      : "綁定失敗：找不到此 Email 的會員，或該帳號已綁定其他 LINE。"
+    await replyText(
+      replyToken,
+      ok
+        ? `✅ 已綁定 Email：${email}\n之後可直接輸入關鍵字查詢、簽到或寫心得。`
+        : "綁定失敗：找不到此 Email 的會員，或該帳號已綁定其他 LINE。"
     );
     return;
   }
@@ -158,7 +175,8 @@ async function handleEvent(ev){
     }
 
     const expText = info.expire ? fmtDate(info.expire) : "（未設定）";
-    await replyText(replyToken,
+    await replyText(
+      replyToken,
       `📇 會員狀態\nEmail：${info.email || "（未設定或空白）"}\n狀態：${info.status || "（未設定）"}\n等級：${info.level || "（未設定）"}\n有效日期：${expText}\nLINE 綁定：${info.lineBind || "（未設定）"}`
     );
     return;
@@ -167,10 +185,13 @@ async function handleEvent(ev){
   /* ===== 簽到 ===== */
   if (/^(簽到|打卡)(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+    if (!gate.ok) {
+      await replyText(replyToken, gate.hint);
+      return;
+    }
 
     const content = normalizeText(text.replace(/^(簽到|打卡)(?:\s|$)/, "")) || "簽到";
-    const pageId = await writeRecord({ email: gate.email, userId, category:"簽到", content });
+    const pageId = await writeRecord({ email: gate.email, userId, category: "簽到", content });
 
     await replyText(replyToken, `✅ 已簽到！\n內容：${content}\n(記錄ID: ${shortId(pageId)})`);
     return;
@@ -179,7 +200,10 @@ async function handleEvent(ev){
   /* ===== 心得 ===== */
   if (/^心得(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+    if (!gate.ok) {
+      await replyText(replyToken, gate.hint);
+      return;
+    }
 
     const content = normalizeText(text.replace(/^心得(?:\s|$)/, ""));
     if (!content) {
@@ -187,7 +211,7 @@ async function handleEvent(ev){
       return;
     }
 
-    const pageId = await writeRecord({ email: gate.email, userId, category:"心得", content });
+    const pageId = await writeRecord({ email: gate.email, userId, category: "心得", content });
     await replyText(replyToken, `📝 已寫入心得！\n${content}\n(記錄ID: ${shortId(pageId)})`);
     return;
   }
@@ -195,7 +219,10 @@ async function handleEvent(ev){
   /* ===== AI 產文 ===== */
   if (/^文案(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
-    if (!gate.ok) { await replyText(replyToken, gate.hint); return; }
+    if (!gate.ok) {
+      await replyText(replyToken, gate.hint);
+      return;
+    }
 
     const topic = normalizeText(text.replace(/^文案(?:\s|$)/, ""));
     if (!topic) {
@@ -241,14 +268,25 @@ async function handleEvent(ev){
     return;
   }
 
-  /* ===== 主題查詢 ===== */
+  /* ===== 主題查詢：有命中才走主題；沒命中就交給 answer.js V4 ===== */
   const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(text);
   if (mTopic) {
     const topic = normalizeText(mTopic[1]);
-    await doTopicSearch(replyToken, userId, topic);
+    const itemsAsTopic = await queryQaByTopic(topic, 10);
+
+    if (itemsAsTopic.length > 0) {
+      await doTopicSearch(replyToken, userId, topic, itemsAsTopic);
+      return;
+    }
+
+    await doRouterSearch(replyToken, userId, topic, {
+      originalText: text,
+      category: "教材查詢"
+    });
     return;
   }
 
+  /* ===== 直接輸入主題名稱：只有真的有主題命中才攔截 ===== */
   if (QA_DB_ID) {
     const itemsAsTopic = await queryQaByTopic(text, 10);
     if (itemsAsTopic.length > 0) {
@@ -257,35 +295,46 @@ async function handleEvent(ev){
     }
   }
 
-  /* ===== Router 查詢 ===== */
+  /* ===== 其餘全部交給 Router ===== */
+  await doRouterSearch(replyToken, userId, text, {
+    originalText: text,
+    category: "症狀查詢"
+  });
+}
+
+/* ====== Router 查詢子流程 ====== */
+async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   const gate = await ensureMemberAllowed(userId);
   if (!gate.ok) {
     await replyText(replyToken, gate.hint);
     return;
   }
 
+  const contentForRecord = options.originalText || queryText;
+  const category = options.category || "症狀查詢";
+
   const pageId = await writeRecord({
     email: gate.email,
     userId,
-    category: "症狀查詢",
-    content: text
+    category,
+    content: contentForRecord
   });
 
-  await replyLoading(replyToken, `「${text}」查詢中，請稍候…`);
+  await replyLoading(replyToken, `「${queryText}」查詢中，請稍候…`);
 
   const ans = await postJSON(ANSWER_URL, {
-    q: text,
-    question: text,
+    q: queryText,
+    question: queryText,
     email: gate.email
   }, 20000);
 
   const list = coerceList(ans);
   const first = list[0] || ans?.answer || {};
 
-  const segFirst = getField(first, ["對應脊椎分節","segments","segment"]) || "";
-  const tipFirst = getField(first, ["教材版回覆","教材重點","tips","summary","reply","AI回覆"]) || "";
-  const titleFirst = getField(first, ["問題","question","query"]) || "";
-  const routerType = ans?.intent || getField(first, ["類型","type","intent","AI判斷類型"]) || "未分類";
+  const segFirst = getField(first, ["對應脊椎分節", "segments", "segment"]) || "";
+  const tipFirst = getField(first, ["教材版回覆", "教材重點", "tips", "summary", "reply", "AI回覆"]) || "";
+  const titleFirst = getField(first, ["問題", "question", "query"]) || "";
+  const routerType = ans?.intent || getField(first, ["類型", "type", "intent", "AI判斷類型"]) || "未分類";
   const matched = list.length > 0;
   const risk = getRiskLabel(routerType, first);
 
@@ -301,15 +350,15 @@ async function handleEvent(ev){
   });
 
   try {
-    const flex = buildSymptomsCarousel(text, list, 3);
-    await pushFlex(userId, `查詢：「${text}」`, flex);
+    const flex = buildSymptomsCarousel(queryText, list, 3);
+    await pushFlex(userId, `查詢：「${queryText}」`, flex);
 
     if (list.length > 3) {
       await pushText(userId, "\n提示：輸入「顯示全部 關鍵字」可看更多");
     }
   } catch (e) {
-    console.error("[symptom_push_fallback]", e);
-    const out = formatSymptomsMessage(text, list, 3);
+    console.error("[router_push_fallback]", e);
+    const out = formatSymptomsMessage(queryText, list, 3);
     await pushText(userId, out.text);
   }
 }
@@ -328,14 +377,14 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   const pageId = await writeRecord({
     email: gate.email,
     userId,
-    category:"教材查詢",
-    content:`主題 ${topic}`
+    category: "教材查詢",
+    content: `主題 ${topic}`
   });
 
   const items = Array.isArray(itemsOptional) ? itemsOptional : await queryQaByTopic(topic, 10);
   const first = items[0] || {};
   const segFirst = getField(first, ["對應脊椎分節"]) || "";
-  const tipFirst = getField(first, ["教材版回覆","教材重點"]) || "";
+  const tipFirst = getField(first, ["教材版回覆", "教材重點"]) || "";
   const titleFirst = getField(first, ["問題"]) || "";
 
   await patchRecordById(pageId, {
@@ -364,7 +413,7 @@ async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
 }
 
 /* ====== QA_DB 查詢 ====== */
-async function queryQaByTopic(topic, limit=10){
+async function queryQaByTopic(topic, limit = 10) {
   if (!QA_DB_ID || !topic) return [];
 
   const r = await notionQueryDatabase(QA_DB_ID, {
@@ -377,7 +426,7 @@ async function queryQaByTopic(topic, limit=10){
   return pages.map(pageToItem);
 }
 
-function pageToItem(page){
+function pageToItem(page) {
   const p = page?.properties || {};
   const tText = (prop) => (prop?.title || []).map(t => t?.plain_text || "").join("").trim();
   const rText = (prop) => (prop?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
@@ -407,13 +456,13 @@ function getCardType(it) {
          "查詢結果";
 }
 
-function formatSymptomsMessage(query, items, showN=3){
+function formatSymptomsMessage(query, items, showN = 3) {
   const arr = items || [];
   const shown = arr.slice(0, showN);
   const moreCount = Math.max(0, arr.length - shown.length);
   const lines = [`🔎 查詢：「${query}」`];
 
-  if (!shown.length){
+  if (!shown.length) {
     lines.push(
       "", "#1 查詢結果",
       "・問題：—",
@@ -427,15 +476,15 @@ function formatSymptomsMessage(query, items, showN=3){
   } else {
     shown.forEach((it, idx) => {
       const cardType = getCardType(it);
-      const q = getField(it, ["question","問題","query"]) || query;
-      const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
-      const seg = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-      const flow = getField(it, ["臨床流程建議","flow","process","判斷流程"]) || "—";
-      const mer = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充","客戶溝通話術"]) || "—";
-      const ai = getField(it, ["AI回覆","ai_reply","ai","answer","AI教學說法"]) || "—";
+      const q = getField(it, ["question", "問題", "query"]) || query;
+      const key1 = getField(it, ["教材版回覆", "教材重點", "tips", "summary", "reply"]) || "—";
+      const seg = getField(it, ["對應脊椎分節", "segments", "segment"]) || "—";
+      const flow = getField(it, ["臨床流程建議", "flow", "process", "判斷流程"]) || "—";
+      const mer = getField(it, ["經絡與補充", "meridians", "meridian", "經絡", "經絡強補充", "客戶溝通話術"]) || "—";
+      const ai = getField(it, ["AI回覆", "ai_reply", "ai", "answer", "AI教學說法"]) || "—";
 
       lines.push(
-        `${idx===0 ? "\n" : ""}#${idx+1} ${cardType}`,
+        `${idx === 0 ? "\n" : ""}#${idx + 1} ${cardType}`,
         `・問題：${q}`,
         `・教材重點：${key1}`,
         `・對應脊椎分節：${seg}`,
@@ -454,11 +503,11 @@ function formatSymptomsMessage(query, items, showN=3){
   return { text: lines.join("\n"), moreCount };
 }
 
-function formatSymptomsAll(query, items, limit=50){
+function formatSymptomsAll(query, items, limit = 50) {
   const arr = (items || []).slice(0, limit);
   const lines = [`🔎 查詢：「${query}」`];
 
-  if (!arr.length){
+  if (!arr.length) {
     lines.push(
       "", "#1 查詢結果",
       "・問題：—",
@@ -472,15 +521,15 @@ function formatSymptomsAll(query, items, limit=50){
   } else {
     arr.forEach((it, idx) => {
       const cardType = getCardType(it);
-      const q = getField(it, ["question","問題","query"]) || query;
-      const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
-      const seg = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-      const flow = getField(it, ["臨床流程建議","flow","process","判斷流程"]) || "—";
-      const mer = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充","客戶溝通話術"]) || "—";
-      const ai = getField(it, ["AI回覆","ai_reply","ai","answer","AI教學說法"]) || "—";
+      const q = getField(it, ["question", "問題", "query"]) || query;
+      const key1 = getField(it, ["教材版回覆", "教材重點", "tips", "summary", "reply"]) || "—";
+      const seg = getField(it, ["對應脊椎分節", "segments", "segment"]) || "—";
+      const flow = getField(it, ["臨床流程建議", "flow", "process", "判斷流程"]) || "—";
+      const mer = getField(it, ["經絡與補充", "meridians", "meridian", "經絡", "經絡強補充", "客戶溝通話術"]) || "—";
+      const ai = getField(it, ["AI回覆", "ai_reply", "ai", "answer", "AI教學說法"]) || "—";
 
       lines.push(
-        `${idx===0 ? "\n" : ""}#${idx+1} ${cardType}`,
+        `${idx === 0 ? "\n" : ""}#${idx + 1} ${cardType}`,
         `・問題：${q}`,
         `・教材重點：${key1}`,
         `・對應脊椎分節：${seg}`,
@@ -495,7 +544,7 @@ function formatSymptomsAll(query, items, limit=50){
   return lines.join("\n");
 }
 
-function getField(obj, keys){
+function getField(obj, keys) {
   if (!obj) return "";
   for (const k of keys) {
     if (obj[k]) return String(obj[k]);
@@ -514,14 +563,14 @@ function getRiskLabel(routerType, first) {
 }
 
 /* ====== 會員狀態守門 ====== */
-async function ensureMemberAllowed(userId){
+async function ensureMemberAllowed(userId) {
   const info = await getMemberInfoByLineId(userId);
 
   if (!info || !isEmail(info.email)) {
     return {
-      ok:false,
-      email:"",
-      hint:"尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com"
+      ok: false,
+      email: "",
+      hint: "尚未綁定 Email。請輸入「綁定 你的Email」，例如：綁定 test@example.com"
     };
   }
 
@@ -529,9 +578,9 @@ async function ensureMemberAllowed(userId){
 
   if (statusName && BLOCK_STATUS_NAMES.includes(statusName)) {
     return {
-      ok:false,
-      email:info.email,
-      hint:`此帳號狀態為「${statusName}」，暫停使用查詢/簽到/心得功能。`
+      ok: false,
+      email: info.email,
+      hint: `此帳號狀態為「${statusName}」，暫停使用查詢/簽到/心得功能。`
     };
   }
 
@@ -541,17 +590,17 @@ async function ensureMemberAllowed(userId){
 
     if (String(expDate) !== "Invalid Date" && expDate < today) {
       return {
-        ok:false,
-        email:info.email,
-        hint:`此帳號已過有效日期（${fmtDate(info.expire)}）。`
+        ok: false,
+        email: info.email,
+        hint: `此帳號已過有效日期（${fmtDate(info.expire)}）。`
       };
     }
   }
 
-  return { ok:true, email:info.email, status:info.status, expire:info.expire };
+  return { ok: true, email: info.email, status: info.status, expire: info.expire };
 }
 
-async function getMemberInfoByLineId(userId){
+async function getMemberInfoByLineId(userId) {
   if (!MEMBER_DB || !userId) return null;
 
   const r = await notionQueryDatabase(MEMBER_DB, {
@@ -571,7 +620,7 @@ async function getMemberInfoByLineId(userId){
   return { email, status, level, expire, lineBind };
 }
 
-async function bindEmailToLine(userId, email){
+async function bindEmailToLine(userId, email) {
   if (!MEMBER_DB || !userId || !isEmail(email)) return false;
 
   let r = await notionQueryDatabase(MEMBER_DB, {
@@ -612,7 +661,7 @@ async function bindEmailToLine(userId, email){
 }
 
 /* ====== Notion 共用 ====== */
-async function notionQueryDatabase(dbId, body){
+async function notionQueryDatabase(dbId, body) {
   const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
     method: "POST",
     headers: {
@@ -630,7 +679,7 @@ async function notionQueryDatabase(dbId, body){
   }
 }
 
-async function notionPatchPage(pageId, data){
+async function notionPatchPage(pageId, data) {
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
     headers: {
@@ -645,7 +694,7 @@ async function notionPatchPage(pageId, data){
   return r.ok;
 }
 
-async function notionCreatePage(dbId, properties){
+async function notionCreatePage(dbId, properties) {
   const r = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
     headers: {
@@ -666,7 +715,7 @@ async function notionCreatePage(dbId, properties){
 }
 
 /* ====== 紀錄 DB 寫入／回填 ====== */
-async function writeRecord({ email, userId, category, content, source="LINE" }){
+async function writeRecord({ email, userId, category, content, source = "LINE" }) {
   const nowISO = new Date().toISOString();
   const nowTW = new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
 
@@ -695,7 +744,7 @@ async function patchRecordById(pageId, {
   risk,
   matchedKb,
   adminNote
-}){
+}) {
   if (!pageId) return;
 
   const page = await notionGetPage(pageId);
@@ -751,7 +800,7 @@ async function patchRecordById(pageId, {
 }
 
 /* ====== Notion 輔助 ====== */
-async function notionGetPage(pageId){
+async function notionGetPage(pageId) {
   const r = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "GET",
     headers: {
@@ -768,7 +817,7 @@ async function notionGetPage(pageId){
   }
 }
 
-function buildPropValueByType(propItem, value){
+function buildPropValueByType(propItem, value) {
   if (!propItem || !propItem.type) {
     return { rich_text: [{ text: { content: String(value ?? "").slice(0, 1900) } }] };
   }
@@ -811,13 +860,13 @@ function buildPropValueByType(propItem, value){
 }
 
 /* ====== OpenAI（產 IG 開頭文案） ====== */
-async function getOpenAIClient(){
+async function getOpenAIClient() {
   if (!OPENAI_API_KEY) throw new Error("缺少 OPENAI_API_KEY");
   const { default: OpenAI } = await import("openai");
   return new OpenAI({ apiKey: OPENAI_API_KEY });
 }
 
-function buildCopyPrompt(userTopic){
+function buildCopyPrompt(userTopic) {
   return [
     {
       role: "system",
@@ -830,7 +879,7 @@ function buildCopyPrompt(userTopic){
   ];
 }
 
-async function generateCopyText(topic){
+async function generateCopyText(topic) {
   const client = await getOpenAIClient();
   const started = Date.now();
 
@@ -843,30 +892,30 @@ async function generateCopyText(topic){
   const answer = completion?.choices?.[0]?.message?.content?.trim() || "";
   const latency = Date.now() - started;
   const tokens = completion?.usage || {
-    prompt_tokens:0,
-    completion_tokens:0,
-    total_tokens:0
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0
   };
 
   return { answer, latency_ms: latency, tokens };
 }
 
 /* ====== Flex 卡片 ====== */
-function buildSymptomBubble(it, idx, queryLabel){
-  const q = getField(it, ["question","問題","query"]) || queryLabel || "查詢結果";
+function buildSymptomBubble(it, idx, queryLabel) {
+  const q = getField(it, ["question", "問題", "query"]) || queryLabel || "查詢結果";
 
   const cardType =
     getField(it, ["類型", "type", "intent", "AI判斷類型"]) ||
     getField(it, ["主題", "topic"]) ||
     "查詢結果";
 
-  const key1 = getField(it, ["教材版回覆","教材重點","tips","summary","reply"]) || "—";
-  const seg = getField(it, ["對應脊椎分節","segments","segment"]) || "—";
-  const flow = getField(it, ["臨床流程建議","flow","process","判斷流程"]) || "—";
-  const mer = getField(it, ["經絡與補充","meridians","meridian","經絡","經絡強補充","客戶溝通話術"]) || "—";
-  const ai = getField(it, ["AI回覆","ai_reply","ai","answer","AI教學說法"]) || "—";
+  const key1 = getField(it, ["教材版回覆", "教材重點", "tips", "summary", "reply"]) || "—";
+  const seg = getField(it, ["對應脊椎分節", "segments", "segment"]) || "—";
+  const flow = getField(it, ["臨床流程建議", "flow", "process", "判斷流程"]) || "—";
+  const mer = getField(it, ["經絡與補充", "meridians", "meridian", "經絡", "經絡強補充", "客戶溝通話術"]) || "—";
+  const ai = getField(it, ["AI回覆", "ai_reply", "ai", "answer", "AI教學說法"]) || "—";
 
-  const lim = (s, n=180) => String(s || "").length > n
+  const lim = (s, n = 180) => String(s || "").length > n
     ? String(s).slice(0, n - 1) + "…"
     : String(s || "");
 
@@ -897,20 +946,20 @@ function buildSymptomBubble(it, idx, queryLabel){
     }
   };
 
-  function row(label, value){
+  function row(label, value) {
     return {
-      type:"box",
-      layout:"baseline",
-      spacing:"sm",
-      contents:[
-        { type:"text", text: label, color:"#888888", size:"sm", flex:2 },
-        { type:"text", text: value || "—", wrap:true, size:"sm", flex:5 }
+      type: "box",
+      layout: "baseline",
+      spacing: "sm",
+      contents: [
+        { type: "text", text: label, color: "#888888", size: "sm", flex: 2 },
+        { type: "text", text: value || "—", wrap: true, size: "sm", flex: 5 }
       ]
     };
   }
 }
 
-function buildSymptomsCarousel(queryLabel, items=[], showN=3){
+function buildSymptomsCarousel(queryLabel, items = [], showN = 3) {
   const arr = (items || []).slice(0, Math.min(showN, 12));
   const bubbles = arr.map((it, i) => buildSymptomBubble(it, i, queryLabel));
 
@@ -921,7 +970,7 @@ function buildSymptomsCarousel(queryLabel, items=[], showN=3){
 }
 
 /* ====== LINE 回覆 / Push ====== */
-async function replyFlex(replyToken, altText, flexContents, quickList=[]){
+async function replyFlex(replyToken, altText, flexContents, quickList = []) {
   if (!LINE_TOKEN) {
     console.warn("[replyFlex] missing LINE_CHANNEL_ACCESS_TOKEN");
     return;
@@ -929,14 +978,14 @@ async function replyFlex(replyToken, altText, flexContents, quickList=[]){
 
   const items = (quickList || [])
     .map(q => ({
-      type:"action",
-      action:{
-        type:"message",
-        label:q.label,
-        text:q.text
+      type: "action",
+      action: {
+        type: "message",
+        label: q.label,
+        text: q.text
       }
     }))
-    .slice(0,12);
+    .slice(0, 12);
 
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
@@ -958,7 +1007,7 @@ async function replyFlex(replyToken, altText, flexContents, quickList=[]){
   if (!r.ok) console.error("[replyFlex]", r.status, await safeText(r));
 }
 
-async function replyText(replyToken, text){
+async function replyText(replyToken, text) {
   if (!LINE_TOKEN) {
     console.warn("[replyText] missing LINE_CHANNEL_ACCESS_TOKEN");
     return;
@@ -982,7 +1031,7 @@ async function replyText(replyToken, text){
   if (!r.ok) console.error("[replyText]", r.status, await safeText(r));
 }
 
-async function replyTextQR(replyToken, text, quickList=[]){
+async function replyTextQR(replyToken, text, quickList = []) {
   if (!LINE_TOKEN) {
     console.warn("[replyTextQR] missing LINE_CHANNEL_ACCESS_TOKEN");
     return;
@@ -990,14 +1039,14 @@ async function replyTextQR(replyToken, text, quickList=[]){
 
   const items = (quickList || [])
     .map(q => ({
-      type:"action",
-      action:{
-        type:"message",
-        label:q.label,
-        text:q.text
+      type: "action",
+      action: {
+        type: "message",
+        label: q.label,
+        text: q.text
       }
     }))
-    .slice(0,12);
+    .slice(0, 12);
 
   const r = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
@@ -1008,8 +1057,8 @@ async function replyTextQR(replyToken, text, quickList=[]){
     body: JSON.stringify({
       replyToken,
       messages: [{
-        type:"text",
-        text:String(text || "").slice(0,4900),
+        type: "text",
+        text: String(text || "").slice(0, 4900),
         quickReply: items.length ? { items } : undefined
       }]
     })
@@ -1018,7 +1067,7 @@ async function replyTextQR(replyToken, text, quickList=[]){
   if (!r.ok) console.error("[replyTextQR]", r.status, await safeText(r));
 }
 
-async function replyLoading(replyToken, label="正在查詢…"){
+async function replyLoading(replyToken, label = "正在查詢…") {
   const bubble = {
     type: "bubble",
     size: "kilo",
@@ -1040,12 +1089,12 @@ async function replyLoading(replyToken, label="正在查詢…"){
   };
 
   return replyFlex(replyToken, "系統處理中", {
-    type:"carousel",
-    contents:[bubble]
+    type: "carousel",
+    contents: [bubble]
   });
 }
 
-async function pushText(toUserId, text){
+async function pushText(toUserId, text) {
   if (!LINE_TOKEN) {
     console.warn("[pushText] missing LINE_CHANNEL_ACCESS_TOKEN");
     return;
@@ -1060,8 +1109,8 @@ async function pushText(toUserId, text){
     body: JSON.stringify({
       to: toUserId,
       messages: [{
-        type:"text",
-        text: String(text || "").slice(0,4900)
+        type: "text",
+        text: String(text || "").slice(0, 4900)
       }]
     })
   });
@@ -1069,7 +1118,7 @@ async function pushText(toUserId, text){
   if (!r.ok) console.error("[pushText]", r.status, await safeText(r));
 }
 
-async function pushFlex(toUserId, altText, flexContents){
+async function pushFlex(toUserId, altText, flexContents) {
   if (!LINE_TOKEN) {
     console.warn("[pushFlex] missing LINE_CHANNEL_ACCESS_TOKEN");
     return;
@@ -1084,7 +1133,7 @@ async function pushFlex(toUserId, altText, flexContents){
     body: JSON.stringify({
       to: toUserId,
       messages: [{
-        type:"flex",
+        type: "flex",
         altText: String(altText || "查詢結果"),
         contents: flexContents
       }]
@@ -1095,19 +1144,19 @@ async function pushFlex(toUserId, altText, flexContents){
 }
 
 /* ====== HTTP / 其他 ====== */
-async function postJSON(url, body, timeoutMs=20000){
+async function postJSON(url, body, timeoutMs = 20000) {
   const ac = new AbortController();
   const id = setTimeout(() => ac.abort(), timeoutMs);
 
   try {
     const r = await fetch(url, {
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "Accept":"application/json"
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
       },
-      body:JSON.stringify(body || {}),
-      signal:ac.signal
+      body: JSON.stringify(body || {}),
+      signal: ac.signal
     });
 
     const txt = await r.text();
@@ -1124,15 +1173,15 @@ async function postJSON(url, body, timeoutMs=20000){
   } catch (e) {
     console.error("[postJSON]", e?.message || e);
     return {
-      ok:false,
-      error:e?.message || "fetch_failed"
+      ok: false,
+      error: e?.message || "fetch_failed"
     };
   } finally {
     clearTimeout(id);
   }
 }
 
-async function safeText(res){
+async function safeText(res) {
   try {
     return await res.text();
   } catch {
@@ -1140,7 +1189,7 @@ async function safeText(res){
   }
 }
 
-function readPropEmail(props, key){
+function readPropEmail(props, key) {
   if (!props || !key || !props[key]) return "";
 
   const e1 = props[key]?.email || "";
@@ -1156,7 +1205,7 @@ function readPropEmail(props, key){
 }
 
 /* ====== 說明 ====== */
-function helpText(){
+function helpText() {
   return [
     "可用指令：",
     "• 綁定 your@email.com",
@@ -1164,21 +1213,21 @@ function helpText(){
     "• 簽到 [內容]",
     "• 心得 你的心得……",
     "• 文案 你的主題（自動生 IG 開頭）",
-    "• 主題 基礎理論  （或直接輸入：基礎理論）",
+    "• 主題 基礎理論",
     "• 顯示全部 主題 基礎理論",
     "• 直接輸入教材問題或症狀關鍵字（例：PD怎麼判斷、C1、手麻、為什麼不打痛點）"
   ].join("\n");
 }
 
-function fmtDate(iso){
+function fmtDate(iso) {
   try {
     const d = new Date(iso);
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   } catch {
     return iso;
   }
 }
 
-function shortId(id){
-  return id ? id.replace(/-/g,"").slice(0,8) : "";
+function shortId(id) {
+  return id ? id.replace(/-/g, "").slice(0, 8) : "";
 }
