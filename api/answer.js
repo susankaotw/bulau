@@ -1,6 +1,6 @@
 // api/answer.js
-// 不老 AI Router 查詢版
-// 支援：會員 Email 檢核、Router 判斷、Notion 教學知識庫查詢、回傳 line-webhook 可讀的 items 格式
+// 不老 AI Router 查詢版 V2
+// 支援：會員 Email 檢核、Router 判斷、Notion 教學知識庫查詢、命中排序、回傳 line-webhook 可讀的 items 格式
 
 const { Client } = require("@notionhq/client");
 
@@ -128,15 +128,68 @@ function extractKeywords(text) {
   const keywords = [];
 
   const patterns = [
-    "為什麼不打痛點", "不打痛點", "打一邊", "為什麼打一邊",
-    "半脫位", "動態半脫位", "靜態半脫位",
-    "神經", "脊椎", "筋膜", "修復機制", "自我修復",
-    "PD", "長短腳", "姿勢偏差", "骨盆下沉",
-    "頭痛", "頭暈", "耳鳴", "失眠", "落枕",
-    "肩痛", "肩頸", "手麻", "腰痛", "背痛", "膝蓋痛",
-    "坐骨神經", "足底筋膜", "腳跟痛",
-    "骨折", "腫瘤", "急性發炎", "骨質疏鬆", "感染",
-    "筋膜槍", "活化槍", "專業型筋膜槍",
+    "PD怎麼判斷",
+    "PD判斷",
+    "PD檢測",
+    "PD腳",
+    "腳檢測",
+    "骨盆下沉",
+
+    "為什麼不打痛點",
+    "不打痛點",
+    "打一邊",
+    "為什麼打一邊",
+    "剛打完覺得好痠",
+    "會痠",
+    "好痠",
+    "多久打一次",
+    "第一次比較久",
+
+    "半脫位",
+    "動態半脫位",
+    "靜態半脫位",
+    "神經",
+    "脊椎",
+    "筋膜",
+    "修復機制",
+    "自我修復",
+
+    "PD",
+    "長短腳",
+    "姿勢偏差",
+    "骨盆下沉",
+    "問診",
+    "評估",
+
+    "頭痛",
+    "頭暈",
+    "耳鳴",
+    "失眠",
+    "落枕",
+    "肩痛",
+    "肩頸",
+    "手麻",
+    "腰痛",
+    "背痛",
+    "膝蓋痛",
+    "坐骨神經",
+    "足底筋膜",
+    "腳跟痛",
+
+    "骨折",
+    "腫瘤",
+    "急性發炎",
+    "發炎",
+    "骨質疏鬆",
+    "骨鬆",
+    "感染",
+    "打釘",
+    "開刀",
+
+    "筋膜槍",
+    "活化槍",
+    "專業型筋膜槍",
+
     "C1", "C2", "C3", "C4", "C5", "C6", "C7",
     "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12",
     "L1", "L2", "L3", "L4", "L5",
@@ -147,7 +200,6 @@ function extractKeywords(text) {
     if (t.includes(p)) keywords.push(p);
   }
 
-  // 額外抓英文分節
   const segs = t.match(/\b(C[1-7]|T[1-9]|T1[0-2]|L[1-5])\b/g);
   if (segs) {
     for (const s of segs) {
@@ -190,9 +242,9 @@ function getTextFromPage(page, key) {
   return "";
 }
 
-function pageToItemForLine(page) {
+function pageToItemForLine(page, intent = "") {
   const title = getTextFromPage(page, "問題");
-  const type = getTextFromPage(page, "類型");
+  const type = getTextFromPage(page, "類型") || intent || "查詢結果";
   const topic = getTextFromPage(page, "主題");
   const material = getTextFromPage(page, "教材版回覆");
   const aiTeach = getTextFromPage(page, "AI教學說法");
@@ -204,7 +256,7 @@ function pageToItemForLine(page) {
   const meridian = getTextFromPage(page, "經絡與補充");
   const risk = getTextFromPage(page, "風險提醒");
   const contraindication = getTextFromPage(page, "禁忌標記");
-  const version = getTextFromPage(page, "版本號") || "router-v1";
+  const version = getTextFromPage(page, "版本號") || "router-v2";
 
   const aiReplyParts = [];
   if (aiTeach) aiReplyParts.push(aiTeach);
@@ -233,66 +285,143 @@ function pageToItemForLine(page) {
   };
 }
 
+// ---------- 命中排序 ----------
+function scorePage(page, intent, text, keywords) {
+  const title = getTextFromPage(page, "問題");
+  const type = getTextFromPage(page, "類型");
+  const topic = getTextFromPage(page, "主題");
+  const keyText = getTextFromPage(page, "關鍵字");
+  const segment = getTextFromPage(page, "對應脊椎分節");
+  const material = getTextFromPage(page, "教材版回覆");
+  const aiTeach = getTextFromPage(page, "AI教學說法");
+  const process = getTextFromPage(page, "判斷流程");
+  const talk = getTextFromPage(page, "客戶溝通話術");
+
+  const all = `${title} ${type} ${topic} ${keyText} ${segment} ${material} ${aiTeach} ${process} ${talk}`;
+
+  let score = 0;
+
+  if (type === intent) score += 80;
+
+  for (const k of keywords) {
+    if (!k) continue;
+    if (title.includes(k)) score += 70;
+    if (keyText.includes(k)) score += 60;
+    if (topic.includes(k)) score += 35;
+    if (segment.includes(k)) score += 35;
+    if (material.includes(k)) score += 20;
+    if (aiTeach.includes(k)) score += 20;
+    if (process.includes(k)) score += 20;
+    if (talk.includes(k)) score += 15;
+    if (all.includes(k)) score += 10;
+  }
+
+  if (text && title && text.includes(title)) score += 60;
+  if (title && text && title.includes(text)) score += 50;
+
+  // PD 類優先
+  if (/PD|pd|長短腳|腳長|怎麼判斷|判斷流程|骨盆下沉|姿勢偏差/.test(text)) {
+    if (/PD|長短腳|腳檢測|骨盆下沉|姿勢偏差|判斷/.test(title)) score += 120;
+    if (type === "判斷流程") score += 100;
+    if (topic.includes("PD")) score += 80;
+    if (keyText.includes("PD")) score += 80;
+  }
+
+  // QA 問法優先
+  if (/為什麼|怎麼|多久|不打痛點|打一邊|會痠|好痠|第一次/.test(text)) {
+    if (type === "QA教學") score += 90;
+    if (/不打痛點|打一邊|痠|多久|第一次/.test(title)) score += 100;
+  }
+
+  // 禁忌優先
+  if (/骨折|腫瘤|癌|急性|發炎|感染|骨鬆|骨質疏鬆|打釘|開刀/.test(text)) {
+    if (type === "禁忌風險") score += 150;
+    if (/骨折|腫瘤|禁忌|風險|不能|不適宜/.test(title)) score += 120;
+  }
+
+  // 分節查詢優先
+  if (/\b(C[1-7]|T[1-9]|T1[0-2]|L[1-5])\b/.test(text)) {
+    if (type === "症狀對應" || type === "分節對應") score += 80;
+    if (segment && text.includes(segment)) score += 100;
+  }
+
+  return score;
+}
+
 // ---------- Notion 查詢 ----------
-async function queryByTitle(text, limit = 5) {
+async function queryByTitle(text, limit = 10) {
   const key = clean(text).slice(0, 30);
   if (!key) return [];
 
-  const r = await notion.databases.query({
-    database_id: DB_ID,
-    filter: {
-      and: [
-        { property: "是否啟用", checkbox: { equals: true } },
-        { property: "問題", title: { contains: key } }
-      ]
-    },
-    sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-    page_size: limit
-  });
+  try {
+    const r = await notion.databases.query({
+      database_id: DB_ID,
+      filter: {
+        and: [
+          { property: "是否啟用", checkbox: { equals: true } },
+          { property: "問題", title: { contains: key } }
+        ]
+      },
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+      page_size: limit
+    });
 
-  return r.results || [];
+    return r.results || [];
+  } catch (e) {
+    console.error("[queryByTitle]", e?.message || e);
+    return [];
+  }
 }
 
-async function queryByType(intent, limit = 10) {
+async function queryByType(intent, limit = 20) {
   if (!intent) return [];
 
-  const r = await notion.databases.query({
-    database_id: DB_ID,
-    filter: {
-      and: [
-        { property: "是否啟用", checkbox: { equals: true } },
-        { property: "類型", select: { equals: intent } }
-      ]
-    },
-    sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-    page_size: limit
-  });
+  try {
+    const r = await notion.databases.query({
+      database_id: DB_ID,
+      filter: {
+        and: [
+          { property: "是否啟用", checkbox: { equals: true } },
+          { property: "類型", select: { equals: intent } }
+        ]
+      },
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+      page_size: limit
+    });
 
-  return r.results || [];
+    return r.results || [];
+  } catch (e) {
+    console.error("[queryByType]", e?.message || e);
+    return [];
+  }
 }
 
-async function queryByKeyword(keyword, limit = 10) {
+async function queryByKeyword(keyword, limit = 20) {
   if (!keyword) return [];
 
-  const r = await notion.databases.query({
-    database_id: DB_ID,
-    filter: {
-      and: [
-        { property: "是否啟用", checkbox: { equals: true } },
-        { property: "關鍵字", multi_select: { contains: keyword } }
-      ]
-    },
-    sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-    page_size: limit
-  });
+  try {
+    const r = await notion.databases.query({
+      database_id: DB_ID,
+      filter: {
+        and: [
+          { property: "是否啟用", checkbox: { equals: true } },
+          { property: "關鍵字", multi_select: { contains: keyword } }
+        ]
+      },
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+      page_size: limit
+    });
 
-  return r.results || [];
+    return r.results || [];
+  } catch (e) {
+    console.error("[queryByKeyword]", keyword, e?.message || e);
+    return [];
+  }
 }
 
-async function queryBySegment(segment, limit = 10) {
+async function queryBySegment(segment, limit = 20) {
   if (!segment) return [];
 
-  // 先用 rich_text 查，若你的「對應脊椎分節」是文字欄會成功
   try {
     const r = await notion.databases.query({
       database_id: DB_ID,
@@ -307,11 +436,8 @@ async function queryBySegment(segment, limit = 10) {
     });
 
     if (r.results?.length) return r.results;
-  } catch (e) {
-    // 如果欄位不是 rich_text，會進到 fallback
-  }
+  } catch (e) {}
 
-  // fallback：multi_select
   try {
     const r2 = await notion.databases.query({
       database_id: DB_ID,
@@ -331,36 +457,42 @@ async function queryBySegment(segment, limit = 10) {
   }
 }
 
-async function searchKnowledgeBase(intent, text) {
-  const keywords = extractKeywords(text);
+function uniquePages(pages) {
+  const map = new Map();
+  for (const p of pages || []) {
+    if (p?.id && !map.has(p.id)) map.set(p.id, p);
+  }
+  return [...map.values()];
+}
+
+async function searchKnowledgeBase(intent, text, keywords) {
   let results = [];
 
-  // 1. 先用完整問題標題查
-  results = await queryByTitle(text, 5);
-  if (results.length) return results;
+  // 1. 完整標題查詢
+  results.push(...await queryByTitle(text, 10));
 
-  // 2. 分節查詢
-  if (intent === "分節查詢") {
-    const seg = keywords.find(k => /^(C[1-7]|T[1-9]|T1[0-2]|L[1-5]|薦椎|尾椎|骨盆)$/.test(k));
-    if (seg) {
-      results = await queryBySegment(seg, 10);
-      if (results.length) return results;
-    }
-  }
-
-  // 3. 關鍵字查詢
+  // 2. 關鍵字查詢
   for (const k of keywords) {
-    results = await queryByKeyword(k, 10);
-    if (results.length) return results;
+    results.push(...await queryByKeyword(k, 20));
   }
 
-  // 4. 用 Router 類型查
-  results = await queryByType(intent, 10);
-  if (results.length) return results;
+  // 3. 分節查詢
+  const seg = keywords.find(k => /^(C[1-7]|T[1-9]|T1[0-2]|L[1-5]|薦椎|尾椎|骨盆)$/.test(k));
+  if (seg) {
+    results.push(...await queryBySegment(seg, 20));
+  }
 
-  // 5. 最後用教材查詢
-  results = await queryByType("核心觀念", 5);
-  return results;
+  // 4. 類型查詢
+  results.push(...await queryByType(intent, 20));
+
+  // 5. 若完全沒有，補核心觀念
+  results = uniquePages(results);
+
+  if (!results.length) {
+    results.push(...await queryByType("核心觀念", 10));
+  }
+
+  return uniquePages(results);
 }
 
 // ---------- 主 API ----------
@@ -408,18 +540,26 @@ module.exports = async (req, res) => {
     const keywords = extractKeywords(userQuestion);
     const matchedKeyword = keywords[0] || userQuestion;
 
-    const pages = await searchKnowledgeBase(intent, userQuestion);
-    const items = (pages || []).slice(0, 5).map(pageToItemForLine);
+    let pages = await searchKnowledgeBase(intent, userQuestion, keywords);
+
+    pages = (pages || []).sort((a, b) => {
+      const sa = scorePage(a, intent, userQuestion, keywords);
+      const sb = scorePage(b, intent, userQuestion, keywords);
+      return sb - sa;
+    });
+
+    const items = pages.slice(0, 5).map(page => pageToItemForLine(page, intent));
 
     if (!items.length) {
       return res.json({
         mode: "Router查詢",
+        email,
         intent,
         matched: matchedKeyword,
         count: 0,
         items: [],
         answer: null,
-        version: "router-v1",
+        version: "router-v2",
         updated_at: null,
         message: "查不到相符條目，請改用其他關鍵字，例如：C1、PD、手麻、為什麼不打痛點。"
       });
@@ -433,7 +573,7 @@ module.exports = async (req, res) => {
       count: items.length,
       items,
       answer: items[0],
-      version: items[0]?.version || "router-v1",
+      version: items[0]?.version || "router-v2",
       updated_at: items[0]?.updated_at || null
     });
 
