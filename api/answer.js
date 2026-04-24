@@ -1,196 +1,140 @@
-// api/answer.js
-// 查詢版（支援多筆 + 會員Email檢核）
+// ===== AI Router + Notion 查詢版 =====
 
 const { Client } = require("@notionhq/client");
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
-const DB_ID = process.env.NOTION_DB_ID;                // QA 主資料庫
-const MEMBER_DB = process.env.NOTION_MEMBER_DB_ID;     // 會員名單資料庫（必填以啟用檢核）
-const JOIN_URL = process.env.JOIN_URL || "";
+const DB_ID = process.env.NOTION_DB_ID;
 
-// ---------- 小工具 ----------
-const rtText = (prop) => (prop?.rich_text || []).map(t => t?.plain_text || "").join("").trim();
-const titleText = (prop) => (prop?.title || []).map(t => t?.plain_text || "").join("").trim();
-const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||""));
+// ===== Router =====
+function detectIntent(text) {
+  const t = text;
 
-function guessTopic(q) {
-  if (!q) return null;
-  if (/肩|頸/.test(q)) return "症狀對應";
-  if (/手|臂|肘|上肢/.test(q)) return "上肢";
-  if (/腰|背|下背/.test(q)) return "腰背";
-  if (/膝|腿|下肢/.test(q)) return "下肢";
-  return null;
+  if (/骨折|腫瘤|發炎|骨鬆/.test(t)) return "禁忌風險";
+  if (/PD|長短腳|姿勢|判斷/.test(t)) return "判斷流程";
+  if (/C[1-7]|T[1-9]|T1[0-2]|L[1-5]/.test(t)) return "分節查詢";
+  if (/痛|痠|麻|卡|無力|頭痛|肩|腰/.test(t)) return "症狀查詢";
+  if (/為什麼|原理|什麼是|半脫位|神經/.test(t)) return "核心觀念";
+  if (/打一邊|不打痛點|多久|會痠/.test(t)) return "QA教學";
+
+  return "其他";
 }
 
-function pageToItem(page){
-  const p = page.properties || {};
-  return {
-    主題: p["主題"]?.select?.name || "",
-    問題: titleText(p["問題"]) || rtText(p["問題"]) || "",
-    教材版回覆: rtText(p["教材版回覆"]),
-    臨床流程建議: rtText(p["臨床流程建議"]),
-    對應脊椎分節: rtText(p["對應脊椎分節"]),
-    經絡與補充: rtText(p["經絡與補充"]),
-    version: p["版本號"]?.rich_text?.[0]?.plain_text || rtText(p["版本號"]) || "v1.0.0",
-    updated_at: page.last_edited_time,
-    id: page.id
-  };
+// ===== 關鍵字 =====
+function extractKeyword(text) {
+  const list = ["C1","C2","C5","T6","L4","L5","頭痛","肩痛","腰痛","手麻","足底"];
+  return list.find(k => text.includes(k)) || text;
 }
 
-// 取得「台北時區」今天的 YYYY-MM-DD 文字（用於字串比較）
-function taipeiTodayYMD() {
-  const d = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
-  // 轉成 YYYY-MM-DD
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+// ===== 查 Notion =====
+async function searchDB(intent, keyword) {
+  const filters = [
+    {
+      property: "是否啟用",
+      checkbox: { equals: true }
+    }
+  ];
 
-// 從 Notion page properties 取出到期日（支援「有效日期」或「有效期限」）
-function extractExpireDateYMD(p) {
-  const d1 = p["有效日期"]?.date;
-  const d2 = p["有效期限"]?.date;
-  const d = d1 || d2;
-  if (!d) return null;
-  const end = d.end || d.start;
-  if (!end) return null;
-  // Notion 回來通常是 ISO 字串，取前 10 碼（YYYY-MM-DD）
-  return String(end).slice(0, 10);
-}
-
-// ---------- 會員檢核（狀態 + 到期日） ----------
-async function checkMember(email){
-  if (!MEMBER_DB) {
-    // 未設定會員DB時，為避免誤鎖全部，預設放行
-    return { ok: true, level: "" };
-  }
-  // 以 Email 型別查
-  let r = await notion.databases.query({
-    database_id: MEMBER_DB,
-    filter: { property: "Email", email: { equals: email } },
-    page_size: 1
-  });
-  // 後備：Email 欄若被建成 Rich text
-  if (!r.results?.length) {
-    r = await notion.databases.query({
-      database_id: MEMBER_DB,
-      filter: { property: "Email", rich_text: { equals: email } },
-      page_size: 1
+  if (intent !== "其他") {
+    filters.push({
+      property: "類型",
+      select: { equals: intent }
     });
   }
-  if (!r.results?.length) return { ok: false, reason: "not_found" };
 
-  const p = r.results[0].properties || {};
+  if (intent === "分節查詢") {
+    filters.push({
+      property: "對應脊椎分節",
+      rich_text: { contains: keyword }
+    });
+  }
 
-  // 狀態必須為「啟用」
-  const statusName =
-    (p["狀態"]?.status?.name) ||
-    (p["狀態"]?.select?.name) || "";
-  const statusOK = statusName === "啟用";
-  if (!statusOK) return { ok:false, reason:"disabled" };
+  if (intent === "症狀查詢") {
+    filters.push({
+      property: "關鍵字",
+      multi_select: { contains: keyword }
+    });
+  }
 
-  // 到期檢查（欄位允許是「有效日期」或「有效期限」，任一存在即採用；空白視為不限期）
-  const today = taipeiTodayYMD();
-  const expireYMD = extractExpireDateYMD(p); // 可能為 null
-  const notExpired = !expireYMD || expireYMD >= today; // 以字串比較 YYYY-MM-DD
-  if (!notExpired) return { ok:false, reason:"expired" };
+  const res = await notion.databases.query({
+    database_id: DB_ID,
+    filter: { and: filters },
+    page_size: 3
+  });
 
-  // 等級（可選）
-  const level =
-    p["等級"]?.select?.name ||
-    (p["等級"]?.multi_select || []).map(x=>x.name).join(",") || "";
-  return { ok:true, level };
+  return res.results;
 }
 
-// ---------- 主處理 ----------
+// ===== 取文字 =====
+function getText(p, key) {
+  const prop = p[key];
+  if (!prop) return "";
+
+  if (prop.type === "title")
+    return prop.title.map(t => t.plain_text).join("");
+
+  if (prop.type === "rich_text")
+    return prop.rich_text.map(t => t.plain_text).join("");
+
+  if (prop.type === "select")
+    return prop.select?.name || "";
+
+  return "";
+}
+
+// ===== 組回覆 =====
+function buildReply(page) {
+  const p = page.properties;
+
+  return `【${getText(p, "問題")}】
+
+【教材重點】
+${getText(p, "教材版回覆")}
+
+【學員理解】
+${getText(p, "AI教學說法")}
+
+【臨床流程】
+${getText(p, "臨床流程建議")}
+
+【判斷方式】
+${getText(p, "判斷流程")}
+
+【溝通話術】
+${getText(p, "客戶溝通話術")}
+
+【安全提醒】
+${getText(p, "風險提醒") || "此為教學用途，非醫療診斷"}`;
+}
+
+// ===== 主 API =====
 module.exports = async (req, res) => {
   try {
-    if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
-    if (!process.env.NOTION_TOKEN || !DB_ID) {
-      return res.status(500).json({ error: "Missing NOTION_TOKEN or NOTION_DB_ID" });
+    const { question } = req.body;
+
+    if (!question) {
+      return res.json({ answer: "請輸入問題" });
     }
 
-    const { email = "", question, 問題 } = req.body || {};
-    if (!isEmail(email)) {
-      return res.status(400).json({ error: "請輸入有效 Email 才能使用。" });
-    }
+    const intent = detectIntent(question);
+    const keyword = extractKeyword(question);
 
-    // 會員檢核（狀態 + 到期）
-    const gate = await checkMember(email);
-    if (!gate.ok) {
-      const msg =
-        gate.reason === "not_found" ? "此 Email 不在會員名單中。"
-      : gate.reason === "disabled" ? "帳號已停用，如需啟用請聯繫我們。"
-      : gate.reason === "expired"  ? "您的會員已到期，請續約後再使用。"
-      : "目前無法驗證您的資格。";
-      return res.status(403).json({
-        error: JOIN_URL ? `${msg} 申請/續約：${JOIN_URL}` : msg
-      });
-    }
+    const results = await searchDB(intent, keyword);
 
-    const q = String(question ?? 問題 ?? "").trim();
-    if (!q) return res.status(400).json({ error: "請輸入關鍵字" });
-
-    const key = q.length > 16 ? q.slice(0, 16) : q;
-
-    // 依序嘗試：Title → Rich → 主題保底
-    let results = [];
-    let resp = await notion.databases.query({
-      database_id: DB_ID,
-      filter: { property: "問題", title: { contains: key } },
-      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-      page_size: 10
-    });
-    results = resp.results;
-
-    if (!results?.length) {
-      resp = await notion.databases.query({
-        database_id: DB_ID,
-        filter: { property: "問題", rich_text: { contains: key } },
-        sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-        page_size: 10
-      });
-      results = resp.results;
-    }
-
-    if (!results?.length) {
-      const topic = guessTopic(q);
-      if (topic) {
-        resp = await notion.databases.query({
-          database_id: DB_ID,
-          filter: { property: "主題", select: { equals: topic } },
-          sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-          page_size: 10
-        });
-        results = resp.results;
-      }
-    }
-
-    if (!results?.length) {
+    if (!results.length) {
       return res.json({
-        mode: "查詢",
-        email,
-        answer: "查不到相符條目，請改用其他關鍵字（例：肩頸痠痛、手舉不起來）。",
-        matched: null, version: null, updated_at: null, count: 0, items: []
+        answer: "查無資料，請換關鍵字試試（例如：C1、手麻、PD）"
       });
     }
 
-    const N = 5; // 顯示前 N 筆
-    const items = results.slice(0, N).map(pageToItem);
+    const reply = buildReply(results[0]);
 
     return res.json({
-      mode: "查詢",
-      email,
-      matched: key,
-      count: items.length,
-      items,
-      // 相容：仍帶第一筆到舊欄位
-      answer: items[0],
-      version: items[0].version,
-      updated_at: items[0].updated_at
+      answer: reply,
+      intent,
+      keyword
     });
-  } catch (err) {
-    return res.status(500).json({ error: String(err?.message || err) });
+
+  } catch (e) {
+    return res.json({ error: e.message });
   }
 };
