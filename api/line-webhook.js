@@ -1,6 +1,6 @@
 // api/line-webhook.js
 // 功能：綁定 Email、查會員狀態、簽到、心得、主題查詢、Router查詢、IG開頭文案
-// 升級：主題查詢若無命中，會自動改走 answer.js V4 Router
+// 升級：直接輸入關鍵字一律交給 answer.js Router，避免主題查詢攔截造成結果不完整
 
 /* ====== 環境變數 ====== */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
@@ -268,7 +268,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  /* ===== 主題查詢：有命中才走主題；沒命中就交給 answer.js V4 ===== */
+  /* ===== 主題查詢：只有明確輸入「主題 XXX」才走主題查詢 ===== */
   const mTopic = /^主題(?:\s|:|：)?\s*(.+)$/i.exec(text);
   if (mTopic) {
     const topic = normalizeText(mTopic[1]);
@@ -286,16 +286,12 @@ async function handleEvent(ev) {
     return;
   }
 
-  /* ===== 直接輸入主題名稱：只有真的有主題命中才攔截 ===== */
-  if (QA_DB_ID) {
-    const itemsAsTopic = await queryQaByTopic(text, 10);
-    if (itemsAsTopic.length > 0) {
-      await doTopicSearch(replyToken, userId, text, itemsAsTopic);
-      return;
-    }
-  }
-
-  /* ===== 其餘全部交給 Router ===== */
+  /* ===== 直接輸入關鍵字，一律交給 answer.js Router =====
+     重要：
+     不要在 line-webhook.js 直接用「主題」攔截。
+     否則像「半脫位」這種字，會先被 queryQaByTopic() 抓走，
+     導致只回傳陽春資料，而不是 answer.js 排序後的完整資料。
+  */
   await doRouterSearch(replyToken, userId, text, {
     originalText: text,
     category: "症狀查詢"
@@ -428,7 +424,31 @@ async function queryQaByTopic(topic, limit = 10) {
   });
 
   const pages = Array.isArray(r?.results) ? r.results : [];
-  return pages.map(pageToItem);
+  return pages.filter(isPageEnabled).map(pageToItem);
+}
+
+function isPageEnabled(page) {
+  const prop = page?.properties?.["是否啟用"];
+
+  // 沒有這個欄位，一律視為停用，避免錯抓資料
+  if (!prop) return false;
+
+  // 正常 checkbox 欄位
+  if (prop.type === "checkbox") {
+    return prop.checkbox === true;
+  }
+
+  // 保險：如果未來欄位改成 select
+  if (prop.type === "select") {
+    return ["啟用", "使用", "是", "YES", "true"].includes(prop.select?.name || "");
+  }
+
+  // 保險：如果未來欄位改成 status
+  if (prop.type === "status") {
+    return ["啟用", "使用", "是", "YES", "true"].includes(prop.status?.name || "");
+  }
+
+  return false;
 }
 
 function pageToItem(page) {
@@ -1034,42 +1054,6 @@ async function replyText(replyToken, text) {
   });
 
   if (!r.ok) console.error("[replyText]", r.status, await safeText(r));
-}
-
-async function replyTextQR(replyToken, text, quickList = []) {
-  if (!LINE_TOKEN) {
-    console.warn("[replyTextQR] missing LINE_CHANNEL_ACCESS_TOKEN");
-    return;
-  }
-
-  const items = (quickList || [])
-    .map(q => ({
-      type: "action",
-      action: {
-        type: "message",
-        label: q.label,
-        text: q.text
-      }
-    }))
-    .slice(0, 12);
-
-  const r = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${LINE_TOKEN}`
-    },
-    body: JSON.stringify({
-      replyToken,
-      messages: [{
-        type: "text",
-        text: String(text || "").slice(0, 4900),
-        quickReply: items.length ? { items } : undefined
-      }]
-    })
-  });
-
-  if (!r.ok) console.error("[replyTextQR]", r.status, await safeText(r));
 }
 
 async function replyLoading(replyToken, label = "正在查詢…") {
