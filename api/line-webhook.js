@@ -346,6 +346,7 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   }, 30000);
 
   console.log("[answer_response]", JSON.stringify(ans, null, 2));
+  console.log("[WEBHOOK_VERSION]", "AI_REPLY_DIRECT_V1_20260425");
 
   // ✅ 新版 answer.js：優先吃 reply
   if (ans?.reply) {
