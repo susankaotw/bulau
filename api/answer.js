@@ -42,10 +42,18 @@ const VALID_TOPICS = [
 module.exports = async function handler(req, res) {
   try {
     if (req.method === "GET") {
-      return res.status(200).json({
-        ok: true,
-        version: "ANSWER_MD_KB_FUSION_V1_20260425"
-      });
+     const meta = extractAiMeta(reply);
+
+return res.status(200).json({
+  ok: true,
+  reply: meta.cleanText,
+  debug: {
+    ai_type: meta.ai_type,
+    risk_level: meta.risk_level,
+    knowledge_count: knowledgeItems.length,
+    normalized_question: queryInfo.normalized_question
+  }
+});
     }
 
     if (req.method !== "POST") {
@@ -395,6 +403,36 @@ async function generateAnswerByMd(userMessage, queryInfo, knowledgeItems) {
   });
 
   return String(answer || "").trim();
+}
+
+function extractAiMeta(text) {
+  const match = text.match(/【AI判斷】\s*({[\s\S]*?})/);
+
+  if (!match) {
+    return {
+      ai_type: "一般型",
+      risk_level: "無",
+      cleanText: text
+    };
+  }
+
+  try {
+    const json = JSON.parse(match[1]);
+
+    const cleanText = text.replace(match[0], "").trim();
+
+    return {
+      ai_type: json.ai_type || "一般型",
+      risk_level: json.risk_level || "無",
+      cleanText
+    };
+  } catch (e) {
+    return {
+      ai_type: "一般型",
+      risk_level: "無",
+      cleanText: text
+    };
+  }
 }
 
 function formatKnowledgeForAI(items) {
