@@ -1,6 +1,7 @@
 // api/answer.js
-// 不老 AI Router 查詢版 V4
+// 不老 AI Router 查詢版 V4.1
 // 重點：AI 意圖判斷優先、規則 fallback、查詢標準化、強排序、去重、LINE items 格式
+// 修正：是否啟用二次防呆、直接輸入主題字會補查主題資料，例如「半脫位」
 
 const { Client } = require("@notionhq/client");
 
@@ -179,7 +180,7 @@ async function normalizeQuestionWithAI(rawQuestion) {
 - 教材查詢
 
 重要規則：
-1. 如果使用者只輸入「半脫位」，視為「什麼是半脫位」。
+1. 如果使用者只輸入「半脫位」，視為「什麼是半脫位」，但 keywords 一定要包含「半脫位」。
 2. 「半脫位」「什麼是半脫位」「甚麼是半脫位」「半脫位是什麼」「半脫位是甚麼」都視為「什麼是半脫位」，intent = 核心觀念。
 3. 「PD」「PD怎麼判斷」「PD判斷」「PD腳」「長短腳」「骨盆下沉」「姿勢偏差」intent = 判斷流程。
 4. 「C1」「C2」「T6」「L5」等分節，intent = 分節查詢。
@@ -285,7 +286,7 @@ function pageToItemForLine(page, intent = "") {
   const meridian = getTextFromPage(page, "經絡與補充");
   const risk = getTextFromPage(page, "風險提醒");
   const contraindication = getTextFromPage(page, "禁忌標記");
-  const version = getTextFromPage(page, "版本號") || "router-v4";
+  const version = getTextFromPage(page, "版本號") || "router-v4.1";
 
   const aiReplyParts = [];
   if (aiTeach) aiReplyParts.push(aiTeach);
@@ -340,7 +341,7 @@ function scorePage(page, intent, rawText, normalizedText, keywords) {
     if (title === k) score += 180;
     if (title.includes(k)) score += 120;
     if (keyText.includes(k)) score += 100;
-    if (topic.includes(k)) score += 50;
+    if (topic.includes(k)) score += 90;
     if (segment.includes(k)) score += 50;
     if (material.includes(k)) score += 30;
     if (aiTeach.includes(k)) score += 30;
@@ -350,6 +351,7 @@ function scorePage(page, intent, rawText, normalizedText, keywords) {
   }
 
   if (/半脫位/.test(rawText)) {
+    if (topic === "半脫位") score += 260;
     if (title === "什麼是半脫位") score += 500;
     if (title.includes("半脫位")) score += 180;
     if (type === "核心觀念") score += 120;
@@ -379,6 +381,43 @@ function scorePage(page, intent, rawText, normalizedText, keywords) {
   return score;
 }
 
+/* ===== 是否啟用防呆 ===== */
+function isPageEnabled(page) {
+  const prop = page?.properties?.["是否啟用"];
+
+  // 沒有「是否啟用」欄位，直接視為不可查，避免錯抓資料
+  if (!prop) return false;
+
+  if (prop.type === "checkbox") {
+    return prop.checkbox === true;
+  }
+
+  if (prop.type === "select") {
+    return ["啟用", "使用", "是", "YES", "true"].includes(prop.select?.name || "");
+  }
+
+  if (prop.type === "status") {
+    return ["啟用", "使用", "是", "YES", "true"].includes(prop.status?.name || "");
+  }
+
+  return false;
+}
+
+function uniquePages(pages) {
+  const map = new Map();
+
+  for (const p of pages || []) {
+    // 二次防呆：就算 Notion filter 出錯，這裡也會擋掉未啟用資料
+    if (!isPageEnabled(p)) continue;
+
+    if (p?.id && !map.has(p.id)) {
+      map.set(p.id, p);
+    }
+  }
+
+  return [...map.values()];
+}
+
 /* ===== Notion 查詢 ===== */
 async function queryByTitle(text, limit = 10) {
   const key = clean(text).slice(0, 50);
@@ -397,7 +436,7 @@ async function queryByTitle(text, limit = 10) {
       page_size: limit
     });
 
-    return r.results || [];
+    return (r.results || []).filter(isPageEnabled);
   } catch (e) {
     console.error("[queryByTitle]", e?.message || e);
     return [];
@@ -420,9 +459,33 @@ async function queryByType(intent, limit = 20) {
       page_size: limit
     });
 
-    return r.results || [];
+    return (r.results || []).filter(isPageEnabled);
   } catch (e) {
     console.error("[queryByType]", e?.message || e);
+    return [];
+  }
+}
+
+async function queryByTopic(topic, limit = 20) {
+  const key = clean(topic);
+  if (!key) return [];
+
+  try {
+    const r = await notion.databases.query({
+      database_id: DB_ID,
+      filter: {
+        and: [
+          { property: "是否啟用", checkbox: { equals: true } },
+          { property: "主題", select: { equals: key } }
+        ]
+      },
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+      page_size: limit
+    });
+
+    return (r.results || []).filter(isPageEnabled);
+  } catch (e) {
+    console.error("[queryByTopic]", e?.message || e);
     return [];
   }
 }
@@ -443,7 +506,7 @@ async function queryByKeyword(keyword, limit = 20) {
       page_size: limit
     });
 
-    return r.results || [];
+    return (r.results || []).filter(isPageEnabled);
   } catch (e) {
     console.error("[queryByKeyword]", keyword, e?.message || e);
     return [];
@@ -466,7 +529,7 @@ async function queryBySegment(segment, limit = 20) {
       page_size: limit
     });
 
-    if (r.results?.length) return r.results;
+    if (r.results?.length) return (r.results || []).filter(isPageEnabled);
   } catch (e) {}
 
   try {
@@ -482,27 +545,27 @@ async function queryBySegment(segment, limit = 20) {
       page_size: limit
     });
 
-    return r2.results || [];
+    return (r2.results || []).filter(isPageEnabled);
   } catch (e) {
     return [];
   }
 }
 
-function uniquePages(pages) {
-  const map = new Map();
-  for (const p of pages || []) {
-    if (p?.id && !map.has(p.id)) map.set(p.id, p);
-  }
-  return [...map.values()];
-}
-
 async function searchKnowledgeBase({ intent, rawQuestion, normalizedQuestion, keywords }) {
   let results = [];
 
+  // 直接輸入「半脫位」這種主題字時，先抓主題底下所有啟用資料
+  results.push(...await queryByTopic(rawQuestion, 20));
+
+  // 如果 AI 標準化後還是跟主題有關，也補查一次
+  results.push(...await queryByTopic(normalizedQuestion, 20));
+
+  // 再抓標準化問題，例如「半脫位」會變成「什麼是半脫位」
   results.push(...await queryByTitle(normalizedQuestion, 10));
   results.push(...await queryByTitle(rawQuestion, 10));
 
   for (const k of keywords) {
+    results.push(...await queryByTopic(k, 20));
     results.push(...await queryByKeyword(k, 20));
   }
 
@@ -592,7 +655,7 @@ module.exports = async (req, res) => {
         count: 0,
         items: [],
         answer: null,
-        version: "router-v4",
+        version: "router-v4.1",
         updated_at: null,
         message: "查不到相符條目，請改用其他關鍵字，例如：C1、PD、手麻、為什麼不打痛點。"
       });
@@ -609,12 +672,12 @@ module.exports = async (req, res) => {
       count: items.length,
       items,
       answer: items[0],
-      version: items[0]?.version || "router-v4",
+      version: items[0]?.version || "router-v4.1",
       updated_at: items[0]?.updated_at || null
     });
 
   } catch (err) {
-    console.error("[answer_router_v4_error]", err);
+    console.error("[answer_router_v4_1_error]", err);
     return res.status(500).json({ error: String(err?.message || err) });
   }
 };
