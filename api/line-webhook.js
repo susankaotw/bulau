@@ -57,7 +57,10 @@ const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g, " ").replac
 /* ====== 入口 ====== */
 module.exports = async (req, res) => {
   try {
-    if (req.method === "GET") return res.status(200).send("OK");
+    //if (req.method === "GET") return res.status(200).send("OK");
+    if (req.method === "GET") {
+  return res.status(200).send("LINE WEBHOOK VERSION: AI_REPLY_DIRECT_V1_20260425");
+}
     if (req.method !== "POST") return res.status(405).end();
 
     const events = Array.isArray(req.body?.events) ? req.body.events : [];
