@@ -345,6 +345,8 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   await replyLoading(replyToken, `「${queryText}」查詢中，請稍候…`);
 
   const ans = await postJSON(ANSWER_URL, {
+    console.log("🔥 RAW ANSWER:", ans);
+    console.log("🔥 HAS REPLY:", ans?.reply);
     message: queryText,
     q: queryText,
     question: queryText,
