@@ -88,8 +88,8 @@ async function handleEvent(ev) {
   const userId = ev.source?.userId || "";
 
    // ✅ 暫時測試用：確認 LINE 是否真的打到這支新版 webhook
-  await replyText(replyToken, "🔥 NEW VERSION WEBHOOK 🔥");
-  return;
+  //await replyText(replyToken, "🔥 NEW VERSION WEBHOOK 🔥");
+  //return;
 
   /* ===== 顯示全部 ===== */
   const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
