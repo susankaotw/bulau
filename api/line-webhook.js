@@ -1,6 +1,6 @@
 // api/line-webhook.js
 // 功能：綁定 Email、查會員狀態、簽到、心得、主題查詢、Router查詢、IG開頭文案
-// 升級：直接輸入關鍵字一律交給 answer.js Router，避免主題查詢攔截造成結果不完整
+// 升級：新版 answer.js 若回傳 reply，LINE 直接推送 AI + 知識庫融合回答，不再轉成舊卡片
 
 /* ====== 環境變數 ====== */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
@@ -113,7 +113,19 @@ async function handleEvent(ev) {
         return;
       }
 
-      const ans = await postJSON(ANSWER_URL, { q: topic, question: topic, email: gate.email }, 20000);
+      const ans = await postJSON(ANSWER_URL, {
+        message: topic,
+        q: topic,
+        question: topic,
+        email: gate.email,
+        userId
+      }, 30000);
+
+      if (ans?.reply) {
+        await pushText(userId, ans.reply);
+        return;
+      }
+
       const routerList = coerceList(ans);
       try {
         const flex = buildSymptomsCarousel(topic, routerList, Math.min(12, routerList.length || 1));
@@ -125,7 +137,19 @@ async function handleEvent(ev) {
       return;
     }
 
-    const ans = await postJSON(ANSWER_URL, { q: query, question: query, email: gate.email }, 20000);
+    const ans = await postJSON(ANSWER_URL, {
+      message: query,
+      q: query,
+      question: query,
+      email: gate.email,
+      userId
+    }, 30000);
+
+    if (ans?.reply) {
+      await pushText(userId, ans.reply);
+      return;
+    }
+
     const list = coerceList(ans);
 
     try {
@@ -286,12 +310,7 @@ async function handleEvent(ev) {
     return;
   }
 
-  /* ===== 直接輸入關鍵字，一律交給 answer.js Router =====
-     重要：
-     不要在 line-webhook.js 直接用「主題」攔截。
-     否則像「半脫位」這種字，會先被 queryQaByTopic() 抓走，
-     導致只回傳陽春資料，而不是 answer.js 排序後的完整資料。
-  */
+  /* ===== 直接輸入關鍵字，一律交給 answer.js Router ===== */
   await doRouterSearch(replyToken, userId, text, {
     originalText: text,
     category: "症狀查詢"
@@ -319,11 +338,43 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   await replyLoading(replyToken, `「${queryText}」查詢中，請稍候…`);
 
   const ans = await postJSON(ANSWER_URL, {
+    message: queryText,
     q: queryText,
     question: queryText,
-    email: gate.email
-  }, 20000);
+    email: gate.email,
+    userId
+  }, 30000);
 
+  console.log("[answer_response]", JSON.stringify(ans, null, 2));
+
+  // ✅ 新版 answer.js：優先吃 reply
+  if (ans?.reply) {
+    const debug = ans?.debug || {};
+    const matched = Number(debug?.knowledge_count || 0) > 0;
+
+    await patchRecordById(pageId, {
+      seg: "",
+      tip: ans.reply,
+      routerType: debug?.answer_mode || "AI知識庫融合",
+      matched,
+      needReview: !matched,
+      risk: "無",
+      matchedKb: debug?.normalized_question || queryText,
+      adminNote: matched
+        ? ""
+        : "新版 AI 知識庫融合回覆：未命中啟用中知識庫資料，建議檢查關鍵字或新增教材。"
+    });
+
+    await pushText(userId, ans.reply);
+
+    if (ans?.debug) {
+      console.log("[answer_debug]", JSON.stringify(ans.debug, null, 2));
+    }
+
+    return;
+  }
+
+  // 舊版相容：如果 answer.js 還是回傳 results/items/answer，才走卡片
   const list = coerceList(ans);
   const first = list[0] || ans?.answer || {};
 
@@ -430,20 +481,16 @@ async function queryQaByTopic(topic, limit = 10) {
 function isPageEnabled(page) {
   const prop = page?.properties?.["是否啟用"];
 
-  // 沒有這個欄位，一律視為停用，避免錯抓資料
   if (!prop) return false;
 
-  // 正常 checkbox 欄位
   if (prop.type === "checkbox") {
     return prop.checkbox === true;
   }
 
-  // 保險：如果未來欄位改成 select
   if (prop.type === "select") {
     return ["啟用", "使用", "是", "YES", "true"].includes(prop.select?.name || "");
   }
 
-  // 保險：如果未來欄位改成 status
   if (prop.type === "status") {
     return ["啟用", "使用", "是", "YES", "true"].includes(prop.status?.name || "");
   }
@@ -472,7 +519,13 @@ function pageToItem(page) {
 function coerceList(ans) {
   if (Array.isArray(ans?.results)) return ans.results;
   if (Array.isArray(ans?.items)) return ans.items;
-  return ans?.answer ? [ans.answer] : [];
+
+  // ✅ 新版 answer.js 是直接回 reply，不要硬轉成舊卡片
+  if (ans?.reply) return [];
+
+  if (ans?.answer && typeof ans.answer === "object") return [ans.answer];
+
+  return [];
 }
 
 function getCardType(it) {
@@ -1133,7 +1186,7 @@ async function pushFlex(toUserId, altText, flexContents) {
 }
 
 /* ====== HTTP / 其他 ====== */
-async function postJSON(url, body, timeoutMs = 20000) {
+async function postJSON(url, body, timeoutMs = 30000) {
   const ac = new AbortController();
   const id = setTimeout(() => ac.abort(), timeoutMs);
 
@@ -1204,7 +1257,7 @@ function helpText() {
     "• 文案 你的主題（自動生 IG 開頭）",
     "• 主題 基礎理論",
     "• 顯示全部 主題 基礎理論",
-    "• 直接輸入教材問題或症狀關鍵字（例：PD怎麼判斷、C1、手麻、為什麼不打痛點）"
+    "• 直接輸入教材問題或症狀關鍵字（例：半脫位、PD怎麼判斷、C1、手麻、為什麼不打痛點）"
   ].join("\n");
 }
 
