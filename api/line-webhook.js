@@ -312,7 +312,9 @@ async function handleEvent(ev) {
         needReview: false,
         risk: "無",
         matchedKb: "AI產文",
-        adminNote: ""
+        adminNote: "",
+        routerType: debug.ai_type,
+        risk: debug.risk_level
       });
 
       const msg = ["🪄 IG 開頭文案：", "", answer, "", `（延遲 ${latency_ms} ms）`].join("\n");
