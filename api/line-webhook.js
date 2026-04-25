@@ -54,16 +54,27 @@ const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
 const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g, " ").replace(/\s+/g, " "));
 
+function pickReply(ans) {
+  if (!ans) return "";
+  if (typeof ans === "string") return ans;
+  if (ans.reply) return String(ans.reply);
+  if (ans.data && ans.data.reply) return String(ans.data.reply);
+  if (ans.body && ans.body.reply) return String(ans.body.reply);
+  if (ans.raw && typeof ans.raw === "string") return ans.raw;
+  return "";
+}
+
 /* ====== 入口 ====== */
 module.exports = async (req, res) => {
   try {
-    //if (req.method === "GET") return res.status(200).send("OK");
     if (req.method === "GET") {
-  return res.status(200).send("LINE WEBHOOK VERSION: AI_REPLY_DIRECT_V1_20260425");
-}
+      return res.status(200).send("LINE WEBHOOK VERSION: AI_REPLY_DIRECT_V1_20260425");
+    }
+
     if (req.method !== "POST") return res.status(405).end();
 
     const events = Array.isArray(req.body?.events) ? req.body.events : [];
+
     for (const ev of events) {
       try {
         await handleEvent(ev);
@@ -87,15 +98,12 @@ async function handleEvent(ev) {
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
 
-   // ✅ 暫時測試用：確認 LINE 是否真的打到這支新版 webhook
-  //await replyText(replyToken, "🔥 NEW VERSION WEBHOOK 🔥");
-  //return;
-
   /* ===== 顯示全部 ===== */
   const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
   if (mShowAll) {
     const query = normalizeText(mShowAll[2] || "");
     const gate = await ensureMemberAllowed(userId);
+
     if (!gate.ok) {
       await replyText(replyToken, gate.hint);
       return;
@@ -128,12 +136,18 @@ async function handleEvent(ev) {
         userId
       }, 30000);
 
-      if (ans?.reply) {
-        await pushText(userId, ans.reply);
+      const replyTextFromAnswer = pickReply(ans);
+      if (replyTextFromAnswer) {
+        await pushText(userId, replyTextFromAnswer);
         return;
       }
 
       const routerList = coerceList(ans);
+      if (!routerList.length) {
+        await pushText(userId, "目前沒有查到合適資料，請換個說法再試一次。");
+        return;
+      }
+
       try {
         const flex = buildSymptomsCarousel(topic, routerList, Math.min(12, routerList.length || 1));
         await pushFlex(userId, `查詢：「${topic}」（全部）`, flex);
@@ -152,12 +166,17 @@ async function handleEvent(ev) {
       userId
     }, 30000);
 
-    if (ans?.reply) {
-      await pushText(userId, ans.reply);
+    const replyTextFromAnswer = pickReply(ans);
+    if (replyTextFromAnswer) {
+      await pushText(userId, replyTextFromAnswer);
       return;
     }
 
     const list = coerceList(ans);
+    if (!list.length) {
+      await pushText(userId, "目前沒有查到合適資料，請換個說法再試一次。");
+      return;
+    }
 
     try {
       const flex = buildSymptomsCarousel(query, list, Math.min(12, list.length || 1));
@@ -200,6 +219,7 @@ async function handleEvent(ev) {
   /* ===== 狀態 ===== */
   if (/^(我的)?狀態$/i.test(text)) {
     const info = await getMemberInfoByLineId(userId);
+
     if (!info) {
       await replyText(replyToken, "尚未綁定 Email。請輸入：綁定 your@email.com");
       return;
@@ -216,6 +236,7 @@ async function handleEvent(ev) {
   /* ===== 簽到 ===== */
   if (/^(簽到|打卡)(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
+
     if (!gate.ok) {
       await replyText(replyToken, gate.hint);
       return;
@@ -231,12 +252,14 @@ async function handleEvent(ev) {
   /* ===== 心得 ===== */
   if (/^心得(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
+
     if (!gate.ok) {
       await replyText(replyToken, gate.hint);
       return;
     }
 
     const content = normalizeText(text.replace(/^心得(?:\s|$)/, ""));
+
     if (!content) {
       await replyText(replyToken, "請在「心得」後面接文字，例如：心得 今天的頸胸交界手感更清楚了");
       return;
@@ -250,12 +273,14 @@ async function handleEvent(ev) {
   /* ===== AI 產文 ===== */
   if (/^文案(?:\s|$)/.test(text)) {
     const gate = await ensureMemberAllowed(userId);
+
     if (!gate.ok) {
       await replyText(replyToken, gate.hint);
       return;
     }
 
     const topic = normalizeText(text.replace(/^文案(?:\s|$)/, ""));
+
     if (!topic) {
       await replyText(replyToken, "請在「文案」後面接主題，例如：文案 Lifewave X39 逆齡保養開頭文案");
       return;
@@ -327,6 +352,7 @@ async function handleEvent(ev) {
 /* ====== Router 查詢子流程 ====== */
 async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   const gate = await ensureMemberAllowed(userId);
+
   if (!gate.ok) {
     await replyText(replyToken, gate.hint);
     return;
@@ -345,8 +371,6 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   await replyLoading(replyToken, `「${queryText}」查詢中，請稍候…`);
 
   const ans = await postJSON(ANSWER_URL, {
-    console.log("🔥 RAW ANSWER:", ans);
-    console.log("🔥 HAS REPLY:", ans?.reply);
     message: queryText,
     q: queryText,
     question: queryText,
@@ -354,44 +378,64 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
     userId
   }, 30000);
 
-  console.log("[answer_response]", JSON.stringify(ans, null, 2));
   console.log("[WEBHOOK_VERSION]", "AI_REPLY_DIRECT_V1_20260425");
+  console.log("[answer_response]", JSON.stringify(ans, null, 2));
+  console.log("[answer_has_reply]", pickReply(ans) ? "YES" : "NO");
 
-  // ✅ 新版 answer.js：優先吃 reply
-  if (ans?.reply) {
-    const debug = ans?.debug || {};
-    const matched = Number(debug?.knowledge_count || 0) > 0;
+  const replyTextFromAnswer = pickReply(ans);
+
+  if (replyTextFromAnswer) {
+    const debug = ans && ans.debug ? ans.debug : {};
+    const matched = Number(debug.knowledge_count || 0) > 0;
 
     await patchRecordById(pageId, {
       seg: "",
-      tip: ans.reply,
-      routerType: debug?.answer_mode || "AI知識庫融合",
+      tip: replyTextFromAnswer,
+      routerType: debug.answer_mode || "AI知識庫融合",
       matched,
       needReview: !matched,
       risk: "無",
-      matchedKb: debug?.normalized_question || queryText,
+      matchedKb: debug.normalized_question || queryText,
       adminNote: matched
         ? ""
         : "新版 AI 知識庫融合回覆：未命中啟用中知識庫資料，建議檢查關鍵字或新增教材。"
     });
 
-    await pushText(userId, ans.reply);
+    await pushText(userId, replyTextFromAnswer);
 
-    if (ans?.debug) {
-      console.log("[answer_debug]", JSON.stringify(ans.debug, null, 2));
+    if (debug && Object.keys(debug).length) {
+      console.log("[answer_debug]", JSON.stringify(debug, null, 2));
     }
 
     return;
   }
 
-  // 舊版相容：如果 answer.js 還是回傳 results/items/answer，才走卡片
   const list = coerceList(ans);
-  const first = list[0] || ans?.answer || {};
 
+  if (!list.length) {
+    await patchRecordById(pageId, {
+      seg: "",
+      tip: JSON.stringify(ans, null, 2).slice(0, 1800),
+      routerType: "answer.js回傳格式異常",
+      matched: false,
+      needReview: true,
+      risk: "注意",
+      matchedKb: "",
+      adminNote: "answer.js 沒有回傳 reply/results/items/answer，請檢查 answer.js 或 BULAU_ANSWER_URL。"
+    });
+
+    await pushText(
+      userId,
+      "⚠️ 查詢流程有進來，但 answer.js 沒有回傳可顯示資料。\n\n請到 Vercel Logs 搜尋：\n[answer_response]\n\n確認 answer.js 實際回傳內容。"
+    );
+    return;
+  }
+
+  const first = list[0] || {};
   const segFirst = getField(first, ["對應脊椎分節", "segments", "segment"]) || "";
   const tipFirst = getField(first, ["教材版回覆", "教材重點", "tips", "summary", "reply", "AI回覆"]) || "";
   const titleFirst = getField(first, ["問題", "question", "query"]) || "";
-  const routerType = ans?.intent || getField(first, ["類型", "type", "intent", "AI判斷類型"]) || "未分類";
+  const routerType = (ans && ans.intent) || getField(first, ["類型", "type", "intent", "AI判斷類型"]) || "未分類";
   const matched = list.length > 0;
   const risk = getRiskLabel(routerType, first);
 
@@ -424,6 +468,7 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
 async function doTopicSearch(replyToken, userId, topicRaw, itemsOptional) {
   const topic = normalizeText(topicRaw);
   const gate = await ensureMemberAllowed(userId);
+
   if (!gate.ok) {
     await replyText(replyToken, gate.hint);
     return;
@@ -530,8 +575,7 @@ function coerceList(ans) {
   if (Array.isArray(ans?.results)) return ans.results;
   if (Array.isArray(ans?.items)) return ans.items;
 
-  // ✅ 新版 answer.js 是直接回 reply，不要硬轉成舊卡片
-  if (ans?.reply) return [];
+  if (pickReply(ans)) return [];
 
   if (ans?.answer && typeof ans.answer === "object") return [ans.answer];
 
