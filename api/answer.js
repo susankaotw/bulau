@@ -373,7 +373,6 @@ async function queryNotionKnowledge(queryInfo, userMessage) {
 }
 
 function buildSafeKeywordFilters(keyword) {
-function buildSafeKeywordFilters(keyword) {
   const filters = [];
 
   const baseEnabled = {
