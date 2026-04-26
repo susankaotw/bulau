@@ -54,6 +54,70 @@ const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
 const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g, " ").replace(/\s+/g, " "));
 
+/* ====== AI使用說明 ====== */
+const usageGuideText = `
+📘 不老AI助理使用說明
+
+你可以直接輸入「關鍵字」或「問題」，例如：
+
+🔹 基礎知識
+・什麼是美式整脊
+・C1 或 C1的知識
+・胸椎有哪些
+
+🔹 結構觀察
+・PD腳怎麼看
+・腰痠怎麼打
+・頭痛怎麼打
+・足底筋膜炎怎麼打
+
+🔹 實務安全
+・怎麼避免觸法
+
+—
+
+🤖 AI助理會這樣幫你：
+
+① 有教材資料  
+→ 提供教材內容 + 安全說法
+
+② 資料不足  
+→ 依結構 × 神經 × 肌肉補充
+
+③ 持續優化  
+→ 你的查詢會幫助AI變更準
+
+—
+
+⚠️ 免責聲明  
+不老AI可以協助做結構觀察、溝通練習、學習整理與經驗分享，
+但不是醫療診斷或疾病治療建議
+`;
+
+function isUsageGuideIntent(text) {
+  const t = String(text || "").toLowerCase();
+
+  const keywords = [
+    "如何使用ai",
+    "如何使用 ai",
+    "ai操作",
+    "ai 操作",
+    "ai操作說明",
+    "ai 操作說明",
+    "操作說明",
+    "系統說明",
+    "使用說明",
+    "怎麼用ai",
+    "怎麼用 ai",
+    "ai怎麼用",
+    "ai 怎麼用",
+    "ai助理怎麼用",
+    "ai 助理怎麼用"
+  ];
+
+  return keywords.some(k => t.includes(k));
+}
+
 function pickReply(ans) {
   if (!ans) return "";
   if (typeof ans === "string") return ans;
@@ -97,6 +161,12 @@ async function handleEvent(ev) {
   const text = normalizeText(ev.message.text);
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId || "";
+
+  /* ===== AI使用說明入口 ===== */
+if (isUsageGuideIntent(text)) {
+  await replyText(replyToken, usageGuideText);
+  return;
+}
 
   /* ===== 顯示全部 ===== */
   const mShowAll = /^顯示(全部|更多)(?:\s|$)(.+)$/i.exec(text);
