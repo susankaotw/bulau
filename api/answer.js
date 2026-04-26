@@ -465,7 +465,7 @@ function buildSafeKeywordFilters(keyword) {
 
   return filters;
 }
-}
+
 
 function isPageEnabled(page) {
   const props = page && page.properties ? page.properties : {};
