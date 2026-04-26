@@ -385,9 +385,7 @@ if (isUsageGuideIntent(text)) {
         needReview: false,
         risk: "無",
         matchedKb: "AI產文",
-        adminNote: "",
-        routerType: debug.ai_type,
-        risk: debug.risk_level
+        adminNote: ""
       });
 
       const msg = ["🪄 IG 開頭文案：", "", answer, "", `（延遲 ${latency_ms} ms）`].join("\n");
@@ -464,19 +462,19 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
     const matched = Number(debug.knowledge_count || 0) > 0;
 
     await patchRecordById(pageId, {
-      seg: "",
-      tip: replyTextFromAnswer,
-      routerType: debug.answer_mode || "AI知識庫融合",
-      matched,
-      needReview: !matched,
-      risk: "無",
-      matchedKb: debug.normalized_question || queryText,
-      adminNote: matched
-        ? ""
-        : "新版 AI 知識庫融合回覆：未命中啟用中知識庫資料，建議檢查關鍵字或新增教材。",
-     aiScore: debug.ai_score,
-     aiReason: debug.ai_reason
-    });
+  seg: "",
+  tip: replyTextFromAnswer,
+  routerType: debug.answer_mode || debug.ai_type || "AI知識庫融合",
+  matched: debug.hit_knowledge_base === true || Number(debug.knowledge_count || 0) > 0,
+  needReview: debug.need_human_update === true,
+  risk: debug.risk_level || "無",
+  matchedKb: debug.primary_title || debug.normalized_question || queryText,
+  adminNote: (debug.hit_knowledge_base === true || Number(debug.knowledge_count || 0) > 0)
+    ? ""
+    : "未命中啟用中知識庫資料，建議檢查關鍵字或新增教材。",
+  aiScore: debug.ai_score,
+  aiReason: debug.ai_reason
+});
 
     await pushText(userId, replyTextFromAnswer);
 
@@ -1066,6 +1064,11 @@ function buildPropValueByType(propItem, value) {
 
     case "checkbox":
       return { checkbox: Boolean(value) };
+
+    case "number": {
+      const n = Number(value);
+      return { number: Number.isFinite(n) ? n : null };
+}
 
     case "email":
       return { email: String(value ?? "") };
