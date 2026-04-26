@@ -1,5 +1,5 @@
 // api/answer.js
-// V6：資料庫主資料優先 + AI補充分層 + AI自評 + Debug強化
+// V6.1 穩定版：資料庫主資料優先 + AI補充分層 + 查詢加速 + LINE 30秒內回覆優化
 // 需要檔案：
 // /prompts/knowledge-query.md
 // /prompts/knowledge-answer.md
@@ -24,7 +24,6 @@ const QA_FLOW = "臨床流程建議";
 const QA_MERIDIAN = "經絡與補充";
 const QA_ENABLED = "是否啟用";
 
-// V6 新增支援欄位
 const QA_AI_TEACHING = "AI教學說法";
 const QA_JUDGEMENT_FLOW = "判斷流程";
 const QA_CUSTOMER_SCRIPT = "客戶溝通話術";
@@ -34,25 +33,6 @@ const QA_KEYWORDS = "關鍵字";
 const QA_TYPE = "類型";
 const QA_BODY_AREA = "身體區域";
 const QA_AUDIENCE = "適用對象";
-
-const QA_FIELD_TYPES = {
-  [QA_QUESTION]: "title",
-  [QA_TOPIC]: "select",
-  [QA_TYPE]: "select",
-  [QA_AUDIENCE]: "select",
-  [QA_BODY_AREA]: "select",
-  [QA_KEYWORDS]: "multi_select",
-
-  [QA_REPLY]: "rich_text",
-  [QA_SEGMENT]: "rich_text",
-  [QA_FLOW]: "rich_text",
-  [QA_MERIDIAN]: "rich_text",
-  [QA_AI_TEACHING]: "rich_text",
-  [QA_JUDGEMENT_FLOW]: "rich_text",
-  [QA_CUSTOMER_SCRIPT]: "rich_text",
-  [QA_RISK_NOTICE]: "rich_text",
-  [QA_CONTRAINDICATION]: "multi_select"
-};
 
 const VALID_TOPICS = [
   "基礎理論",
@@ -83,7 +63,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         name: "Bulau AI Answer API",
-        version: "V6-knowledge-first",
+        version: "V6.1-stable-knowledge-first",
         message: "answer.js is running"
       });
     }
@@ -130,7 +110,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 1. AI 查詢理解層
+    // 1. AI 查詢理解
     const queryInfo = await analyzeQueryByMd(userMessage);
 
     if (requestMode === "expand") {
@@ -140,14 +120,14 @@ module.exports = async function handler(req, res) {
     // 2. 查詢 Notion 啟用中的知識庫
     const knowledgeItems = await queryNotionKnowledge(queryInfo, userMessage);
 
-    // 3. 從命中資料中找出「主資料」
+    // 3. 找主命中資料
     const primaryKnowledgeItem = findPrimaryKnowledgeItem({
       userMessage,
       queryInfo,
       knowledgeItems
     });
 
-    // 4. 決定回答來源模式
+    // 4. 決定回答來源
     const answerSource = decideAnswerSource({
       requestMode,
       queryInfo,
@@ -155,75 +135,26 @@ module.exports = async function handler(req, res) {
       primaryKnowledgeItem
     });
 
-    // 5. 產生第一版回答
-    let draftReply = "";
-
-    if (answerSource === "knowledge_first") {
-      draftReply = await generateKnowledgeFirstAnswer({
-        userMessage,
-        queryInfo,
-        primaryKnowledgeItem,
-        knowledgeItems
-      });
-    } else if (answerSource === "ai_expand") {
-      draftReply = await generateAiExpandAnswer({
-        userMessage,
-        queryInfo,
-        primaryKnowledgeItem,
-        knowledgeItems
-      });
-    } else {
-      draftReply = await generateAiFallbackAnswer({
-        userMessage,
-        queryInfo
-      });
-    }
-
-    // 6. AI 自評
-    const selfReview = await reviewAnswerByAI({
+    // 5. 產生最終回答：V6.1 只打一輪回答 AI，避免 timeout
+    const finalReply = await generateFinalAnswer({
       userMessage,
       queryInfo,
-      knowledgeItems,
+      answerSource,
       primaryKnowledgeItem,
-      draftReply,
-      answerSource
+      knowledgeItems
     });
 
-    // 7. 最終安全整理
-    const finalReply = await improveAnswerByAI({
-      userMessage,
+    const debugMeta = buildDebugMeta({
       queryInfo,
+      answerSource,
       knowledgeItems,
-      primaryKnowledgeItem,
-      draftReply,
-      selfReview,
-      answerSource
+      primaryKnowledgeItem
     });
-
-    const meta = extractAiMeta(finalReply);
 
     return res.status(200).json({
       ok: true,
-      reply: meta.cleanText,
-      debug: {
-        version: "V6-knowledge-first",
-        answer_source: answerSource,
-        normalized_question: queryInfo.normalized_question,
-        query_keywords: queryInfo.query_keywords,
-        answer_mode: queryInfo.answer_mode,
-        audience: queryInfo.audience,
-        knowledge_count: knowledgeItems.length,
-        primary_title: primaryKnowledgeItem ? primaryKnowledgeItem.question : "",
-        primary_score: primaryKnowledgeItem ? primaryKnowledgeItem._score : 0,
-        matched_titles: knowledgeItems.map(function (x) {
-          return x.question || "";
-        }).filter(Boolean),
-        ai_type: meta.ai_type || selfReview.ai_type || "一般型",
-        risk_level: meta.risk_level || selfReview.risk_level || "無",
-        hit_knowledge_base: selfReview.hit_knowledge_base,
-        need_human_update: selfReview.need_human_update,
-        self_review: selfReview
-      }
+      reply: finalReply,
+      debug: debugMeta
     });
   } catch (error) {
     console.error("[answer_error]", error);
@@ -239,7 +170,7 @@ module.exports = async function handler(req, res) {
    讀取 Prompt
 ========================= */
 
-function readPrompt(filename) {    
+function readPrompt(filename) {
   const filePath = path.join(process.cwd(), "prompts", filename);
 
   if (!fs.existsSync(filePath)) {
@@ -255,6 +186,8 @@ function readPrompt(filename) {
 
 async function analyzeQueryByMd(userMessage) {
   const prompt = readPrompt("knowledge-query.md");
+
+  // 暫時保留，方便你確認 prompt 有沒有讀到新版
   console.log("[QUERY_PROMPT_VERSION]", prompt.slice(0, 100));
 
   const content = await callOpenAI({
@@ -292,7 +225,7 @@ async function analyzeQueryByMd(userMessage) {
   return {
     normalized_question: normalizeText(parsed.normalized_question || userMessage),
     need_knowledge_base: parsed.need_knowledge_base !== false,
-    query_keywords: keywords.slice(0, 10),
+    query_keywords: keywords.slice(0, 6),
     answer_mode: parsed.answer_mode || "無法判斷",
     audience: parsed.audience || "student",
     only_enabled: parsed.only_enabled !== false,
@@ -315,7 +248,7 @@ async function queryNotionKnowledge(queryInfo, userMessage) {
       return normalizeText(x);
     })
     .filter(Boolean)
-    .slice(0, 12);
+    .slice(0, 5);
 
   const resultMap = {};
 
@@ -326,7 +259,7 @@ async function queryNotionKnowledge(queryInfo, userMessage) {
       try {
         const data = await notionQueryDatabase(QA_DB_ID, {
           filter,
-          page_size: 10,
+          page_size: 5,
           sorts: [
             {
               timestamp: "last_edited_time",
@@ -370,7 +303,7 @@ async function queryNotionKnowledge(queryInfo, userMessage) {
     userMessage,
     queryInfo,
     items
-  }).slice(0, 10);
+  }).slice(0, 8);
 }
 
 function buildSafeKeywordFilters(keyword) {
@@ -383,7 +316,7 @@ function buildSafeKeywordFilters(keyword) {
     }
   };
 
-  // 1. 問題 title：最重要
+  // 1. 問題 title 欄位：最重要
   filters.push({
     and: [
       baseEnabled,
@@ -396,16 +329,12 @@ function buildSafeKeywordFilters(keyword) {
     ]
   });
 
-  // 2. rich_text 欄位
+  // 2. rich_text 欄位：V6.1 先查核心欄位，避免太慢
   const richTextFields = [
     QA_REPLY,
-    QA_SEGMENT,
-    QA_FLOW,
-    QA_MERIDIAN,
-    QA_AI_TEACHING,
     QA_JUDGEMENT_FLOW,
     QA_CUSTOMER_SCRIPT,
-    QA_RISK_NOTICE
+    QA_AI_TEACHING
   ];
 
   for (const field of richTextFields) {
@@ -422,7 +351,7 @@ function buildSafeKeywordFilters(keyword) {
     });
   }
 
-  // 3. select 欄位：只能用 equals，不可用 rich_text
+  // 3. select 欄位：只能 equals
   const selectFields = [
     QA_TOPIC,
     QA_TYPE,
@@ -444,7 +373,7 @@ function buildSafeKeywordFilters(keyword) {
     });
   }
 
-  // 4. multi_select 欄位：只能用 contains
+  // 4. multi_select 欄位：只能 contains
   const multiSelectFields = [
     QA_KEYWORDS,
     QA_CONTRAINDICATION
@@ -466,7 +395,6 @@ function buildSafeKeywordFilters(keyword) {
 
   return filters;
 }
-
 
 function isPageEnabled(page) {
   const props = page && page.properties ? page.properties : {};
@@ -507,16 +435,16 @@ function pageToKnowledgeItem(page) {
     judgementFlow: readRichText(p[QA_JUDGEMENT_FLOW]),
     customerScript: readRichText(p[QA_CUSTOMER_SCRIPT]),
     riskNotice: readRichText(p[QA_RISK_NOTICE]),
-    contraindication: readRichText(p[QA_CONTRAINDICATION]),
-    keywords: readRichText(p[QA_KEYWORDS]),
-    bodyArea: readRichText(p[QA_BODY_AREA]),
+    contraindication: readMultiSelect(p[QA_CONTRAINDICATION]),
+    keywords: readMultiSelect(p[QA_KEYWORDS]),
+    bodyArea: readSelect(p[QA_BODY_AREA]),
     audience: readSelect(p[QA_AUDIENCE]),
     _score: 0
   };
 }
 
 /* =========================
-   V6：主資料優先排序
+   主資料優先排序
 ========================= */
 
 function sortKnowledgeItems({ userMessage, queryInfo, items }) {
@@ -578,39 +506,39 @@ function scoreKnowledgeItem({ userMessage, queryInfo, item }) {
   let score = 0;
 
   // 問題欄位精準命中最高
-  if (question && raw && question === raw) score += 120;
-  if (question && normalized && question === normalized) score += 100;
+  if (question && raw && question === raw) score += 220;
+  if (question && normalized && question === normalized) score += 180;
 
-  if (question && raw && question.includes(raw)) score += 80;
-  if (raw && question && raw.includes(question)) score += 70;
+  if (question && raw && question.includes(raw)) score += 160;
+  if (raw && question && raw.includes(question)) score += 130;
 
-  if (question && normalized && question.includes(normalized)) score += 65;
-  if (normalized && question && normalized.includes(question)) score += 55;
+  if (question && normalized && question.includes(normalized)) score += 100;
+  if (normalized && question && normalized.includes(question)) score += 80;
 
   // query_keywords 命中問題欄位
   for (const kw of keywords) {
     if (!kw) continue;
 
-    if (question && question === kw) score += 70;
-    if (question && question.includes(kw)) score += 45;
-    if (kw.includes(question) && question.length >= 2) score += 35;
+    if (question && question === kw) score += 90;
+    if (question && question.includes(kw)) score += 60;
+    if (kw.includes(question) && question.length >= 2) score += 45;
 
-    if (itemKeywords && itemKeywords.includes(kw)) score += 25;
-    if (topic && topic.includes(kw)) score += 15;
-    if (type && type.includes(kw)) score += 10;
+    if (itemKeywords && itemKeywords.includes(kw)) score += 30;
+    if (topic && topic.includes(kw)) score += 18;
+    if (type && type.includes(kw)) score += 12;
     if (allText && allText.includes(kw)) score += 8;
   }
 
   // 內容完整度加分
   if (item.teachingAnswer) score += 8;
-  if (item.judgementFlow) score += 10;
+  if (item.judgementFlow) score += 12;
   if (item.clinicalSuggestion) score += 8;
-  if (item.customerScript) score += 8;
-  if (item.aiTeaching) score += 6;
+  if (item.customerScript) score += 10;
+  if (item.aiTeaching) score += 8;
   if (item.riskNotice) score += 4;
 
-  // 避免過短詞過度主導，例如 PD、腳
-  if (question.length <= 2 && raw.length >= 4) score -= 20;
+  // 避免過短標題過度主導
+  if (question.length <= 2 && raw.length >= 4) score -= 30;
 
   return score;
 }
@@ -624,7 +552,7 @@ function normalizeForCompare(s) {
 }
 
 /* =========================
-   V6：回答來源判斷
+   回答來源判斷
 ========================= */
 
 function decideAnswerSource({ requestMode, queryInfo, knowledgeItems, primaryKnowledgeItem }) {
@@ -640,54 +568,99 @@ function decideAnswerSource({ requestMode, queryInfo, knowledgeItems, primaryKno
 }
 
 /* =========================
-   V6：資料庫優先回答
+   產生最終回答
 ========================= */
 
-async function generateKnowledgeFirstAnswer({
+async function generateFinalAnswer({
   userMessage,
   queryInfo,
+  answerSource,
   primaryKnowledgeItem,
   knowledgeItems
 }) {
-  const basePrompt = readPrompt("knowledge-answer.md");
+  const basePrompt = safeReadPrompt("knowledge-answer.md");
 
-  const systemPrompt = [
-    basePrompt,
-    "",
-    "--------------------------------------------------",
-    "【V6 強制規則：資料庫主資料優先】",
-    "",
-    "現在系統已經找到主資料。",
-    "你必須以「主命中資料」作為回答主體。",
-    "",
-    "回答規則：",
-    "1. 一定先呈現主命中資料，不可以先講一般知識。",
-    "2. 不可以把多筆資料混成泛泛說明。",
-    "3. 其他命中資料只能作為補充，不可蓋過主資料。",
-    "4. AI只負責整理語氣、補安全說法，不可以改掉教材核心意思。",
-    "5. 若欄位空白，可以略過，不要硬補。",
-    "6. 若要補充，請放在【AI補充說明】。",
-    "7. 如果使用者問操作、怎麼打、怎麼判斷，必須加入安全提醒。",
-    "8. 回答最後要有【學員溝通提醒】。",
-    "9. 不要提到資料庫、主命中資料、系統內部、debug。",
-    "",
-    "請使用以下輸出結構：",
-    "",
-    "【教材重點】",
-    "整理教材版回覆與AI教學說法。",
-    "",
-    "【判斷流程】",
-    "整理判斷流程與臨床流程建議。",
-    "",
-    "【對客說法】",
-    "整理客戶溝通話術。",
-    "",
-    "【AI補充說明】",
-    "只能做保守補充，不可宣稱治療，不可診斷。",
-    "",
-    "【學員溝通提醒】",
-    "提醒避免醫療診斷、療效承諾、因果說法。"
-  ].join("\n");
+  let systemPrompt = "";
+
+  if (answerSource === "knowledge_first") {
+    systemPrompt = [
+      basePrompt,
+      "",
+      "--------------------------------------------------",
+      "【V6.1 穩定版：資料庫主資料優先】",
+      "",
+      "系統已經找到主命中資料。",
+      "請以主命中資料作為回答主體。",
+      "",
+      "強制規則：",
+      "1. 一定先呈現主命中資料，不可以先講一般知識。",
+      "2. 不可以把多筆資料混成泛泛說明。",
+      "3. 其他命中資料只能作為補充，不可蓋過主資料。",
+      "4. AI只負責整理語氣、補安全說法，不可以改掉教材核心意思。",
+      "5. 若欄位空白，可以略過，不要硬補。",
+      "6. 若要補充，請放在【AI補充說明】。",
+      "7. 如果使用者問操作、怎麼打、怎麼判斷，必須加入安全提醒。",
+      "8. 不要提到資料庫、主命中資料、系統內部、debug。",
+      "",
+      "請使用以下輸出結構：",
+      "",
+      "【教材重點】",
+      "整理教材版回覆與AI教學說法。",
+      "",
+      "【判斷流程】",
+      "整理判斷流程與臨床流程建議。",
+      "",
+      "【對客說法】",
+      "整理客戶溝通話術。",
+      "",
+      "【AI補充說明】",
+      "只能做保守補充，不可宣稱治療，不可診斷。",
+      "",
+      "【學員溝通提醒】",
+      "提醒避免醫療診斷、療效承諾、因果說法。",
+      "",
+      "回答請適合 LINE 閱讀，不要過長。"
+    ].join("\n");
+  } else if (answerSource === "ai_expand") {
+    systemPrompt = [
+      "你是不老AI助理，正在回應學員要求「多補充一點」。",
+      "",
+      "重要規則：",
+      "1. 如果有知識庫資料，仍要以資料庫為基礎。",
+      "2. 這一輪可以比一般回答多補充「結構 × 肌肉 × 神經」邏輯。",
+      "3. 但必須明確保守，不可診斷、不可治療宣稱。",
+      "4. 不要假裝資料庫有沒有寫的內容。",
+      "5. 適合 LINE 閱讀，不要太長。",
+      "",
+      "輸出結構：",
+      "【延伸理解】",
+      "【結構 × 肌肉 × 神經補充】",
+      "【觀察重點】",
+      "【安全提醒】"
+    ].join("\n");
+  } else {
+    systemPrompt = [
+      "你是不老AI助理。",
+      "目前系統沒有找到啟用中的教材資料。",
+      "",
+      "你必須明確告訴學員：",
+      "「目前資料庫還沒有找到這題的完整教材，我先用不老的結構 × 神經 × 肌肉邏輯做安全補充。」",
+      "",
+      "回答規則：",
+      "1. 不可假裝有資料庫內容。",
+      "2. 不可做醫療診斷。",
+      "3. 不可宣稱治療疾病。",
+      "4. 可以做結構觀察、肌肉張力、神經訊號、代償方向的保守說明。",
+      "5. 如果涉及疼痛、麻、無力、暈、胸悶、急性受傷，提醒先由合格醫療專業評估。",
+      "6. 回答要適合 LINE 閱讀。",
+      "",
+      "輸出結構：",
+      "【目前資料狀態】",
+      "【AI安全補充】",
+      "【觀察重點】",
+      "【學員溝通提醒】"
+    ].join("\n");
+  }
 
   const userPrompt = [
     "使用者原始問題：",
@@ -696,72 +669,20 @@ async function generateKnowledgeFirstAnswer({
     "查詢理解結果：",
     JSON.stringify(queryInfo, null, 2),
     "",
-    "主命中資料：",
-    formatSingleKnowledgeForAI(primaryKnowledgeItem),
-    "",
-    "其他命中資料（只能當補充，不可蓋過主資料）：",
-    formatKnowledgeForAI(
-      (knowledgeItems || []).filter(function (x) {
-        return !primaryKnowledgeItem || x.id !== primaryKnowledgeItem.id;
-      }).slice(0, 5)
-    ),
-    "",
-    "請依照 V6 強制規則產生給學員看的回答。"
-  ].join("\n");
-
-  const answer = await callOpenAI({
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ],
-    temperature: 0.2,
-    responseFormatJson: false
-  });
-
-  return String(answer || "").trim();
-}
-
-/* =========================
-   V6：AI延伸補充回答
-========================= */
-
-async function generateAiExpandAnswer({
-  userMessage,
-  queryInfo,
-  primaryKnowledgeItem,
-  knowledgeItems
-}) {
-  const systemPrompt = [
-    "你是不老AI助理，正在回應學員要求「多補充一點」。",
-    "",
-    "重要規則：",
-    "1. 如果有知識庫資料，仍要以資料庫為基礎。",
-    "2. 這一輪可以比一般回答多補充「結構 × 肌肉 × 神經」邏輯。",
-    "3. 但必須明確保守，不可診斷、不可治療宣稱。",
-    "4. 不要假裝資料庫有沒有寫的內容。",
-    "5. 適合 LINE 閱讀，不要太長。",
-    "",
-    "輸出結構：",
-    "【延伸理解】",
-    "【結構 × 肌肉 × 神經補充】",
-    "【觀察重點】",
-    "【安全提醒】"
-  ].join("\n");
-
-  const userPrompt = [
-    "使用者要求延伸補充：",
-    userMessage,
-    "",
-    "查詢理解結果：",
-    JSON.stringify(queryInfo, null, 2),
+    "回答來源：",
+    answerSource,
     "",
     "主命中資料：",
     primaryKnowledgeItem ? formatSingleKnowledgeForAI(primaryKnowledgeItem) : "無主命中資料",
     "",
     "其他命中資料：",
-    formatKnowledgeForAI((knowledgeItems || []).slice(0, 6)),
+    formatKnowledgeForAI(
+      (knowledgeItems || []).filter(function (x) {
+        return !primaryKnowledgeItem || x.id !== primaryKnowledgeItem.id;
+      }).slice(0, 4)
+    ),
     "",
-    "請產生延伸補充回答。"
+    "請產生給學員看的最終回答。"
   ].join("\n");
 
   const answer = await callOpenAI({
@@ -769,7 +690,7 @@ async function generateAiExpandAnswer({
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt }
     ],
-    temperature: 0.35,
+    temperature: answerSource === "ai_expand" ? 0.35 : 0.2,
     responseFormatJson: false
   });
 
@@ -777,257 +698,67 @@ async function generateAiExpandAnswer({
 }
 
 /* =========================
-   V6：資料庫無命中 fallback
+   Debug
 ========================= */
 
-async function generateAiFallbackAnswer({
-  userMessage,
-  queryInfo
+function buildDebugMeta({
+  queryInfo,
+  answerSource,
+  knowledgeItems,
+  primaryKnowledgeItem
 }) {
-  const systemPrompt = [
-    "你是不老AI助理。",
-    "目前系統沒有找到啟用中的教材資料。",
-    "",
-    "你必須明確告訴學員：",
-    "「目前資料庫還沒有找到這題的完整教材，我先用不老的結構 × 神經 × 肌肉邏輯做安全補充。」",
-    "",
-    "回答規則：",
-    "1. 不可假裝有資料庫內容。",
-    "2. 不可做醫療診斷。",
-    "3. 不可宣稱治療疾病。",
-    "4. 可以做結構觀察、肌肉張力、神經訊號、代償方向的保守說明。",
-    "5. 如果涉及疼痛、麻、無力、暈、胸悶、急性受傷，提醒先由合格醫療專業評估。",
-    "6. 回答要適合 LINE 閱讀。",
-    "",
-    "輸出結構：",
-    "【目前資料狀態】",
-    "【AI安全補充】",
-    "【觀察重點】",
-    "【學員溝通提醒】"
-  ].join("\n");
-
-  const userPrompt = [
-    "使用者問題：",
-    userMessage,
-    "",
-    "查詢理解結果：",
-    JSON.stringify(queryInfo, null, 2),
-    "",
-    "請產生保守、安全、不誇大的回答。"
-  ].join("\n");
-
-  const answer = await callOpenAI({
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ],
-    temperature: 0.3,
-    responseFormatJson: false
-  });
-
-  return String(answer || "").trim();
-}
-
-/* =========================
-   AI：自評層
-========================= */
-
-async function reviewAnswerByAI(payload) {
-  const knowledgeText = formatKnowledgeForAI(payload.knowledgeItems);
-  const primaryText = payload.primaryKnowledgeItem
-    ? formatSingleKnowledgeForAI(payload.primaryKnowledgeItem)
-    : "無主命中資料";
-
-  const systemPrompt = [
-    "你是不老AI助理的品質檢查器。",
-    "你的任務不是重新回答使用者，而是評估 AI 回答品質。",
-    "你必須用嚴格標準判斷：是否命中資料庫、是否需要人工補充、回答信心度、問題類型、風險程度。",
-    "請只輸出 JSON，不要輸出其他文字。",
-    "",
-    "判斷原則：",
-    "1. 如果 answer_source = knowledge_first，且有主命中資料，通常 hit_knowledge_base = true。",
-    "2. 如果 answer_source = ai_fallback，代表沒有命中知識庫，hit_knowledge_base = false，need_human_update = true。",
-    "3. 如果回答內容主要靠一般常識，而不是知識庫內容，判斷為低命中。",
-    "4. 如果使用者問題涉及疼痛、麻、無力、暈、胸悶、急性受傷、疾病、診斷、治療，風險提高。",
-    "5. 不老AI助理只能做衛教、結構觀念、保養建議，不可做醫療診斷。",
-    "",
-    "請輸出以下 JSON 格式：",
-    "{",
-    '  "score": 0到100的整數,',
-    '  "confidence": "高" 或 "中" 或 "低",',
-    '  "hit_knowledge_base": true 或 false,',
-    '  "need_human_update": true 或 false,',
-    '  "ai_type": "知識型" 或 "症狀型" 或 "操作型" 或 "風險型" 或 "閒聊型" 或 "未知型",',
-    '  "risk_level": "無" 或 "低" 或 "中" 或 "高",',
-    '  "normalized_question": "整理後的標準問題",',
-    '  "main_gap": "目前回答最大的不足",',
-    '  "suggested_update": "建議管理者補進知識庫的內容",',
-    '  "reason": "簡短說明判斷理由"',
-    "}"
-  ].join("\n");
-
-  const userPrompt = [
-    "使用者原始問題：",
-    payload.userMessage,
-    "",
-    "answer_source：",
-    payload.answerSource,
-    "",
-    "查詢理解結果：",
-    JSON.stringify(payload.queryInfo, null, 2),
-    "",
-    "主命中資料：",
-    primaryText,
-    "",
-    "全部知識庫資料：",
-    knowledgeText,
-    "",
-    "AI 回答：",
-    payload.draftReply
-  ].join("\n");
-
-  const content = await callOpenAI({
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ],
-    temperature: 0.1,
-    responseFormatJson: true
-  });
-
-  const parsed = safeJsonParse(content);
-
-  if (!parsed) {
-    const hasKnowledge = !!(payload.knowledgeItems && payload.knowledgeItems.length);
-
-    return {
-      score: hasKnowledge ? 70 : 40,
-      confidence: hasKnowledge ? "中" : "低",
-      hit_knowledge_base: hasKnowledge,
-      need_human_update: !hasKnowledge,
-      ai_type: "未知型",
-      risk_level: "低",
-      normalized_question: payload.queryInfo.normalized_question || payload.userMessage,
-      main_gap: "AI自評解析失敗，建議人工檢查。",
-      suggested_update: "請檢查此題是否需要補充標準答案。",
-      reason: "JSON parse failed"
-    };
-  }
+  const hitKnowledge = !!(primaryKnowledgeItem && knowledgeItems && knowledgeItems.length > 0);
+  const riskLevel = inferRiskLevel(queryInfo, primaryKnowledgeItem);
 
   return {
-    score: toInt(parsed.score, 0, 100, 50),
-    confidence: normalizeChoice(parsed.confidence, ["高", "中", "低"], "中"),
-    hit_knowledge_base: parsed.hit_knowledge_base === true,
-    need_human_update: parsed.need_human_update === true,
-    ai_type: normalizeChoice(
-      parsed.ai_type,
-      ["知識型", "症狀型", "操作型", "風險型", "閒聊型", "未知型"],
-      "未知型"
-    ),
-    risk_level: normalizeChoice(parsed.risk_level, ["無", "低", "中", "高"], "低"),
-    normalized_question: normalizeText(parsed.normalized_question || payload.queryInfo.normalized_question || payload.userMessage),
-    main_gap: normalizeText(parsed.main_gap || ""),
-    suggested_update: normalizeText(parsed.suggested_update || ""),
-    reason: normalizeText(parsed.reason || "")
+    version: "V6.1-stable-knowledge-first",
+    answer_source: answerSource,
+    normalized_question: queryInfo.normalized_question,
+    query_keywords: queryInfo.query_keywords,
+    answer_mode: queryInfo.answer_mode,
+    audience: queryInfo.audience,
+    knowledge_count: knowledgeItems.length,
+    primary_title: primaryKnowledgeItem ? primaryKnowledgeItem.question : "",
+    primary_score: primaryKnowledgeItem ? primaryKnowledgeItem._score : 0,
+    matched_titles: knowledgeItems.map(function (x) {
+      return x.question || "";
+    }).filter(Boolean),
+    ai_type: inferAiType(queryInfo),
+    risk_level: riskLevel,
+    hit_knowledge_base: hitKnowledge,
+    need_human_update: !hitKnowledge
   };
 }
 
-/* =========================
-   AI：最終安全整理
-========================= */
+function inferAiType(queryInfo) {
+  const mode = queryInfo.answer_mode || "";
 
-async function improveAnswerByAI(payload) {
-  const systemPrompt = [
-    "你是不老AI助理的最終回答整理器。",
-    "",
-    "請根據 answer_source 做最後整理，但不要改變核心內容。",
-    "",
-    "共同規則：",
-    "1. 使用繁體中文、台灣用語。",
-    "2. 語氣要專業、溫和、清楚、不誇大。",
-    "3. 不可做醫療診斷，不可宣稱治療疾病。",
-    "4. 可以用結構、肌肉張力、神經訊號、代償、保養、觀察等語言。",
-    "5. 若有高風險症狀，提醒尋求合格醫療專業評估。",
-    "6. 回答要給使用者看，不要提到 JSON、自評、score、debug。",
-    "7. 不要輸出【AI判斷】JSON。",
-    "",
-    "如果 answer_source = knowledge_first：",
-    "請保留【教材重點】【判斷流程】【對客說法】【AI補充說明】【學員溝通提醒】這種教材型結構。",
-    "",
-    "如果 answer_source = ai_fallback：",
-    "一定要保留『目前資料庫還沒有找到這題的完整教材』的意思。",
-    "",
-    "如果 answer_source = ai_expand：",
-    "可以延伸，但要保守，不可診斷。"
-  ].join("\n");
+  if (mode === "禁忌風險") return "風險型";
+  if (mode === "操作安全" || mode === "判斷流程") return "操作型";
+  if (mode === "症狀狀況") return "症狀型";
+  if (mode === "一般閒聊") return "閒聊型";
 
-  const userPrompt = [
-    "answer_source：",
-    payload.answerSource,
-    "",
-    "使用者原始問題：",
-    payload.userMessage,
-    "",
-    "查詢理解結果：",
-    JSON.stringify(payload.queryInfo, null, 2),
-    "",
-    "主命中資料：",
-    payload.primaryKnowledgeItem ? formatSingleKnowledgeForAI(payload.primaryKnowledgeItem) : "無主命中資料",
-    "",
-    "AI 第一版回答：",
-    payload.draftReply,
-    "",
-    "AI 自評結果：",
-    JSON.stringify(payload.selfReview, null, 2),
-    "",
-    "請整理成最終給使用者看的回答。"
-  ].join("\n");
-
-  const answer = await callOpenAI({
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ],
-    temperature: 0.15,
-    responseFormatJson: false
-  });
-
-  return String(answer || payload.draftReply || "").trim();
+  return "知識型";
 }
 
-/* =========================
-   AI Meta 擷取
-========================= */
+function inferRiskLevel(queryInfo, item) {
+  const text = [
+    queryInfo.normalized_question,
+    queryInfo.answer_mode,
+    (queryInfo.query_keywords || []).join(" "),
+    item ? item.riskNotice : "",
+    item ? item.contraindication : ""
+  ].join(" ");
 
-function extractAiMeta(text) {
-  text = String(text || "");
-
-  const match = text.match(/【AI判斷】\s*({[\s\S]*?})/);
-
-  if (!match) {
-    return {
-      ai_type: "一般型",
-      risk_level: "無",
-      cleanText: text.trim()
-    };
+  if (/劇烈|麻|無力|頭暈|暈眩|胸悶|急性|骨折|腫瘤|感染|中風|發燒|失禁|外傷|惡化/.test(text)) {
+    return "高";
   }
 
-  try {
-    const json = JSON.parse(match[1]);
-    const cleanText = text.replace(match[0], "").trim();
-
-    return {
-      ai_type: json.ai_type || "一般型",
-      risk_level: json.risk_level || "無",
-      cleanText
-    };
-  } catch (e) {
-    return {
-      ai_type: "一般型",
-      risk_level: "無",
-      cleanText: text.trim()
-    };
+  if (/痛|疼痛|怎麼打|操作|判斷|風險|禁忌|觸法|不適/.test(text)) {
+    return "注意";
   }
+
+  return "無";
 }
 
 /* =========================
@@ -1194,6 +925,18 @@ function readSelect(prop) {
   return "";
 }
 
+function readMultiSelect(prop) {
+  if (!prop) return "";
+
+  if (prop.type === "multi_select") {
+    return Array.isArray(prop.multi_select)
+      ? prop.multi_select.map(function (x) { return x.name || ""; }).filter(Boolean).join("、")
+      : "";
+  }
+
+  return "";
+}
+
 /* =========================
    通用工具
 ========================= */
@@ -1230,20 +973,11 @@ function safeJsonParse(text) {
   }
 }
 
-function toInt(value, min, max, fallback) {
-  const n = parseInt(value, 10);
-
-  if (Number.isNaN(n)) return fallback;
-  if (n < min) return min;
-  if (n > max) return max;
-
-  return n;
-}
-
-function normalizeChoice(value, allowed, fallback) {
-  const v = normalizeText(value);
-
-  if (allowed.indexOf(v) >= 0) return v;
-
-  return fallback;
+function safeReadPrompt(fileName) {
+  try {
+    return readPrompt(fileName);
+  } catch (e) {
+    console.error("[safeReadPrompt]", e.message || String(e));
+    return "";
+  }
 }
