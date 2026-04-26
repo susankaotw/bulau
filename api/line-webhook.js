@@ -49,6 +49,9 @@ const REC_RISK         = "風險標記";
 const REC_MATCHED_KB   = "命中知識庫標題";
 const REC_ADMIN_NOTE   = "管理備註";
 
+const REC_AI_SCORE = "AI自評分數";
+const REC_AI_REASON = "AI自評理由";
+
 /* ====== 小工具 ====== */
 const trim = (s) => String(s || "").trim();
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
@@ -470,7 +473,9 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
       matchedKb: debug.normalized_question || queryText,
       adminNote: matched
         ? ""
-        : "新版 AI 知識庫融合回覆：未命中啟用中知識庫資料，建議檢查關鍵字或新增教材。"
+        : "新版 AI 知識庫融合回覆：未命中啟用中知識庫資料，建議檢查關鍵字或新增教材。",
+     aiScore: debug.ai_score,
+     aiReason: debug.ai_reason
     });
 
     await pushText(userId, replyTextFromAnswer);
@@ -947,7 +952,9 @@ async function patchRecordById(pageId, {
   needReview,
   risk,
   matchedKb,
-  adminNote
+  adminNote,
+  aiScore,
+  aiReason
 }) {
   if (!pageId) return;
 
@@ -990,6 +997,14 @@ async function patchRecordById(pageId, {
   if (typeof adminNote !== "undefined" && propsNow[REC_ADMIN_NOTE]) {
     outProps[REC_ADMIN_NOTE] = buildPropValueByType(propsNow[REC_ADMIN_NOTE], adminNote || "");
   }
+
+  if (typeof aiScore !== "undefined" && propsNow[REC_AI_SCORE]) {
+  outProps[REC_AI_SCORE] = buildPropValueByType(propsNow[REC_AI_SCORE], aiScore);
+}
+
+if (typeof aiReason !== "undefined" && propsNow[REC_AI_REASON]) {
+  outProps[REC_AI_REASON] = buildPropValueByType(propsNow[REC_AI_REASON], aiReason || "");
+}
 
   const keys = Object.keys(outProps);
 
