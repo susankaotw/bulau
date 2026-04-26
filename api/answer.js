@@ -239,8 +239,8 @@ module.exports = async function handler(req, res) {
    讀取 Prompt
 ========================= */
 
-function readPrompt("knowledge-query.md") {    
-  const filePath = path.join(process.cwd(), "prompts", "knowledge-query.md");
+function readPrompt(filename) {    
+  const filePath = path.join(process.cwd(), "prompts", filename);
 
   if (!fs.existsSync(filePath)) {
     throw new Error("Prompt file not found: " + filePath);
@@ -255,6 +255,7 @@ function readPrompt("knowledge-query.md") {
 
 async function analyzeQueryByMd(userMessage) {
   const prompt = readPrompt("knowledge-query.md");
+  console.log("[QUERY_PROMPT_VERSION]", prompt.slice(0, 100));
 
   const content = await callOpenAI({
     messages: [
