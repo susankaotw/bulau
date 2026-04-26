@@ -476,6 +476,17 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   aiReason: debug.ai_reason
 });
 
+ if (
+  debug &&
+  debug.need_human_update === true &&
+  pageId &&
+  process.env.AI_CANDIDATE_DB_ID
+) {
+  await createCandidateFromRecord(pageId, {
+    query: queryText
+  });
+}
+
     await pushText(userId, replyTextFromAnswer);
 
     if (debug && Object.keys(debug).length) {
@@ -1416,4 +1427,44 @@ function fmtDate(iso) {
 
 function shortId(id) {
   return id ? id.replace(/-/g, "").slice(0, 8) : "";
+}
+
+async function createCandidateFromRecord(recordId, recordData) {
+  if (!process.env.AI_CANDIDATE_DB_ID) return;
+
+  try {
+    await fetch("https://api.notion.com/v1/pages", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.NOTION_API_KEY}`,
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+      },
+      body: JSON.stringify({
+        parent: {
+          database_id: process.env.AI_CANDIDATE_DB_ID
+        },
+        properties: {
+          問題: {
+            title: [
+              {
+                text: {
+                  content: recordData.query || "未命名問題"
+                }
+              }
+            ]
+          },
+          來源查詢紀錄: {
+            relation: [
+              {
+                id: recordId
+              }
+            ]
+          }
+        }
+      })
+    });
+  } catch (err) {
+    console.error("[createCandidateFromRecord error]", err);
+  }
 }
