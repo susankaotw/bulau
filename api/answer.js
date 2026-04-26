@@ -35,6 +35,25 @@ const QA_TYPE = "類型";
 const QA_BODY_AREA = "身體區域";
 const QA_AUDIENCE = "適用對象";
 
+const QA_FIELD_TYPES = {
+  [QA_QUESTION]: "title",
+  [QA_TOPIC]: "select",
+  [QA_TYPE]: "select",
+  [QA_AUDIENCE]: "select",
+  [QA_BODY_AREA]: "select",
+  [QA_KEYWORDS]: "multi_select",
+
+  [QA_REPLY]: "rich_text",
+  [QA_SEGMENT]: "rich_text",
+  [QA_FLOW]: "rich_text",
+  [QA_MERIDIAN]: "rich_text",
+  [QA_AI_TEACHING]: "rich_text",
+  [QA_JUDGEMENT_FLOW]: "rich_text",
+  [QA_CUSTOMER_SCRIPT]: "rich_text",
+  [QA_RISK_NOTICE]: "rich_text",
+  [QA_CONTRAINDICATION]: "multi_select"
+};
+
 const VALID_TOPICS = [
   "基礎理論",
   "起源與歷史",
@@ -354,6 +373,7 @@ async function queryNotionKnowledge(queryInfo, userMessage) {
 }
 
 function buildSafeKeywordFilters(keyword) {
+function buildSafeKeywordFilters(keyword) {
   const filters = [];
 
   const baseEnabled = {
@@ -363,21 +383,7 @@ function buildSafeKeywordFilters(keyword) {
     }
   };
 
-  const richTextFields = [
-    QA_REPLY,
-    QA_SEGMENT,
-    QA_FLOW,
-    QA_MERIDIAN,
-    QA_AI_TEACHING,
-    QA_JUDGEMENT_FLOW,
-    QA_CUSTOMER_SCRIPT,
-    QA_RISK_NOTICE,
-    QA_CONTRAINDICATION,
-    QA_KEYWORDS,
-    QA_BODY_AREA
-  ];
-
-  // 問題 title
+  // 1. 問題 title：最重要
   filters.push({
     and: [
       baseEnabled,
@@ -390,7 +396,18 @@ function buildSafeKeywordFilters(keyword) {
     ]
   });
 
-  // 其他 rich_text 欄位
+  // 2. rich_text 欄位
+  const richTextFields = [
+    QA_REPLY,
+    QA_SEGMENT,
+    QA_FLOW,
+    QA_MERIDIAN,
+    QA_AI_TEACHING,
+    QA_JUDGEMENT_FLOW,
+    QA_CUSTOMER_SCRIPT,
+    QA_RISK_NOTICE
+  ];
+
   for (const field of richTextFields) {
     filters.push({
       and: [
@@ -405,13 +422,20 @@ function buildSafeKeywordFilters(keyword) {
     });
   }
 
-  // 主題 select
-  if (VALID_TOPICS.indexOf(keyword) >= 0) {
+  // 3. select 欄位：只能用 equals，不可用 rich_text
+  const selectFields = [
+    QA_TOPIC,
+    QA_TYPE,
+    QA_BODY_AREA,
+    QA_AUDIENCE
+  ];
+
+  for (const field of selectFields) {
     filters.push({
       and: [
         baseEnabled,
         {
-          property: QA_TOPIC,
+          property: field,
           select: {
             equals: keyword
           }
@@ -420,7 +444,28 @@ function buildSafeKeywordFilters(keyword) {
     });
   }
 
+  // 4. multi_select 欄位：只能用 contains
+  const multiSelectFields = [
+    QA_KEYWORDS,
+    QA_CONTRAINDICATION
+  ];
+
+  for (const field of multiSelectFields) {
+    filters.push({
+      and: [
+        baseEnabled,
+        {
+          property: field,
+          multi_select: {
+            contains: keyword
+          }
+        }
+      ]
+    });
+  }
+
   return filters;
+}
 }
 
 function isPageEnabled(page) {
