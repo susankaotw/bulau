@@ -239,8 +239,8 @@ module.exports = async function handler(req, res) {
    讀取 Prompt
 ========================= */
 
-function readPrompt(fileName) {
-  const filePath = path.join(process.cwd(), "prompts", fileName);
+function readPrompt("knowledge-query.md") {    
+  const filePath = path.join(process.cwd(), "prompts", "knowledge-query.md");
 
   if (!fs.existsSync(filePath)) {
     throw new Error("Prompt file not found: " + filePath);
