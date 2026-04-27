@@ -499,23 +499,31 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
   const list = coerceList(ans);
 
   if (!list.length) {
-    await patchRecordById(pageId, {
-      seg: "",
-      tip: JSON.stringify(ans, null, 2).slice(0, 1800),
-      routerType: "answer.js回傳格式異常",
-      matched: false,
-      needReview: true,
-      risk: "注意",
-      matchedKb: "",
-      adminNote: "answer.js 沒有回傳 reply/results/items/answer，請檢查 answer.js 或 BULAU_ANSWER_URL。"
-    });
+  await patchRecordById(pageId, {
+    seg: "",
+    tip: JSON.stringify(ans, null, 2).slice(0, 1800),
+    routerType: "answer.js回傳格式異常",
+    matched: false,
+    needReview: true,
+    risk: "注意",
+    matchedKb: "",
+    adminNote: "answer.js 沒有回傳 reply/results/items/answer，請檢查 answer.js 或 BULAU_ANSWER_URL。",
+    aiScore: 40,
+    aiReason: "answer.js 未正常回傳可顯示內容，系統判定此題需要人工檢查。"
+  });
 
-    await pushText(
-      userId,
-      "⚠️ 查詢流程有進來，但 answer.js 沒有回傳可顯示資料。\n\n請到 Vercel Logs 搜尋：\n[answer_response]\n\n確認 answer.js 實際回傳內容。"
-    );
-    return;
+  if (pageId && process.env.AI_CANDIDATE_DB_ID) {
+    await createCandidateFromRecord(pageId, {
+      query: queryText
+    });
   }
+
+  await pushText(
+    userId,
+    "⚠️ 查詢流程有進來，但 answer.js 沒有回傳可顯示資料。\n\n這題已標記為需要人工補充，並嘗試建立 AI候選教材。"
+  );
+  return;
+}
 
   const first = list[0] || {};
   const segFirst = getField(first, ["對應脊椎分節", "segments", "segment"]) || "";
