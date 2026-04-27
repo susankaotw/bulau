@@ -223,7 +223,7 @@ async function queryNotionKnowledge(queryInfo, userMessage) {
       return normalizeText(x);
     })
     .filter(Boolean)
-    .slice(0, 5);
+    .slice(0, 3);
 
   const resultMap = {};
 
@@ -307,11 +307,7 @@ function buildSafeKeywordFilters(keyword) {
     QA_REPLY,
     QA_JUDGEMENT_FLOW,
     QA_CUSTOMER_SCRIPT,
-    QA_AI_TEACHING,
-    QA_SEGMENT,
-    QA_FLOW,
-    QA_MERIDIAN,
-    QA_RISK_NOTICE
+    QA_AI_TEACHING
   ];
 
   for (const field of richTextFields) {
