@@ -449,7 +449,7 @@ async function doRouterSearch(replyToken, userId, queryText, options = {}) {
     question: queryText,
     email: gate.email,
     userId
-  }, 30000);
+  }, 55000);
 
   console.log("[WEBHOOK_VERSION]", "AI_REPLY_DIRECT_V1_20260425");
   console.log("[answer_response]", JSON.stringify(ans, null, 2));
