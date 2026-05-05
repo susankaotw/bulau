@@ -31,6 +31,11 @@ const {
   patchRecordById,
   createCandidateFromRecord
 } = require("../services/recordService");
+const {
+  postJSON,
+  pickReply,
+  coerceList
+} = require("../services/answerService");
 const QA_DB_ID   = process.env.NOTION_QA_DB_ID || process.env.NOTION_DB_ID || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
@@ -105,16 +110,6 @@ function isUsageGuideIntent(text) {
   ];
 
   return keywords.some(k => t.includes(k));
-}
-
-function pickReply(ans) {
-  if (!ans) return "";
-  if (typeof ans === "string") return ans;
-  if (ans.reply) return String(ans.reply);
-  if (ans.data && ans.data.reply) return String(ans.data.reply);
-  if (ans.body && ans.body.reply) return String(ans.body.reply);
-  if (ans.raw && typeof ans.raw === "string") return ans.raw;
-  return "";
 }
 
 /* ====== 入口 ====== */
@@ -651,17 +646,6 @@ function pageToItem(page) {
 }
 
 /* ====== 症狀回覆格式 ====== */
-function coerceList(ans) {
-  if (Array.isArray(ans?.results)) return ans.results;
-  if (Array.isArray(ans?.items)) return ans.items;
-
-  if (pickReply(ans)) return [];
-
-  if (ans?.answer && typeof ans.answer === "object") return [ans.answer];
-
-  return [];
-}
-
 function getCardType(it) {
   return getField(it, ["類型", "type", "intent", "AI判斷類型"]) ||
          getField(it, ["主題", "topic"]) ||
@@ -882,44 +866,6 @@ function buildSymptomsCarousel(queryLabel, items = [], showN = 3) {
     type: "carousel",
     contents: bubbles.length ? bubbles : [buildSymptomBubble({}, 0, queryLabel)]
   };
-}
-
-/* ====== HTTP / 其他 ====== */
-async function postJSON(url, body, timeoutMs = 30000) {
-  const ac = new AbortController();
-  const id = setTimeout(() => ac.abort(), timeoutMs);
-
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      },
-      body: JSON.stringify(body || {}),
-      signal: ac.signal
-    });
-
-    const txt = await r.text();
-    let json;
-
-    try {
-      json = JSON.parse(txt);
-    } catch {
-      json = { raw: txt };
-    }
-
-    json.http = r.status;
-    return json;
-  } catch (e) {
-    console.error("[postJSON]", e?.message || e);
-    return {
-      ok: false,
-      error: e?.message || "fetch_failed"
-    };
-  } finally {
-    clearTimeout(id);
-  }
 }
 
 /* ====== 說明 ====== */
