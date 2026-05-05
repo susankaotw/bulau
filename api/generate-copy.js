@@ -1,5 +1,5 @@
-// /api/generate-copy.js  （Node 18+ / Vercel）
-import OpenAI from "openai";
+// /api/generate-copy.js  （Node 18+）
+const OpenAI = require("openai").default;
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_MODEL   = "gpt-4o-mini";
@@ -83,7 +83,7 @@ async function writeNotion({ title, email, userId, content, aiText, source }) {
 }
 
 // === API Handler ===
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     // 健康檢查（GET）
     if (req.method === "GET") {

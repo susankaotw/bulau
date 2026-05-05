@@ -1,5 +1,5 @@
 // api/env-dump.js
-export default function handler(req, res) {
+module.exports = function handler(req, res) {
   const keys = Object.keys(process.env);
   const interesting = keys.filter(k =>
     ["LINE_", "BULAU_", "NOTION_", "RECORD_"].some(p => k.startsWith(p))
