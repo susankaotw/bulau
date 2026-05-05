@@ -3,6 +3,13 @@
 <head>
   <meta charset="utf-8"/>
   <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+  <meta name="theme-color" content="#553b1f"/>
+  <meta name="application-name" content="不老 AI 助理"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="不老 AI 助理"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+  <link rel="manifest" href="/manifest.json"/>
+  <link rel="apple-touch-icon" href="/logo.png"/>
   <title>Bulao AI Assistant - 學員智慧助手</title>
 
   <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
@@ -491,6 +498,11 @@
           q.value = String(v).trim();
           q.focus();
         }
+      });
+    }
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/service-worker.js").catch(() => {});
       });
     }
   </script>

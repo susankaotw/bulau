@@ -13,6 +13,21 @@ app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
+app.get("/manifest.json", (_req, res) => {
+  res.setHeader("Content-Type", "application/manifest+json");
+  res.sendFile(path.join(__dirname, "manifest.json"));
+});
+
+app.get("/service-worker.js", (_req, res) => {
+  res.setHeader("Content-Type", "application/javascript");
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "service-worker.js"));
+});
+
+app.get("/offline.html", (_req, res) => {
+  res.sendFile(path.join(__dirname, "offline.html"));
+});
+
 app.get("/logo.png", (_req, res) => {
   try {
     const b64Path = path.join(__dirname, "_logo.b64");

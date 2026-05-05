@@ -1,0 +1,24 @@
+{
+  "name": "不老 AI 助理",
+  "short_name": "不老 AI",
+  "description": "不老 AI 助理查詢頁",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fff8f4",
+  "theme_color": "#553b1f",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
