@@ -4,6 +4,14 @@
 
 /* ====== 環境變數 ====== */
 const ANSWER_URL = process.env.BULAU_ANSWER_URL || "https://bulau.vercel.app/api/answer";
+const {
+  trim,
+  isEmail,
+  normalizeText,
+  safeText,
+  fmtDate,
+  shortId
+} = require("../services/textUtils");
 const NOTION_KEY = process.env.NOTION_API_KEY || process.env.NOTION_TOKEN || "";
 const MEMBER_DB  = process.env.NOTION_MEMBER_DB_ID || "";
 const RECORD_DB  = process.env.RECORD_DB_ID || "";
@@ -53,10 +61,6 @@ const REC_AI_SCORE = "AI自評分數";
 const REC_AI_REASON = "AI自評理由";
 
 /* ====== 小工具 ====== */
-const trim = (s) => String(s || "").trim();
-const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || ""));
-const normalizeText = (s) => trim(String(s || "").replace(/\u3000/g, " ").replace(/\s+/g, " "));
-
 /* ====== AI使用說明 ====== */
 const usageGuideText = `
 📘 不老AI助理使用說明
@@ -1386,14 +1390,6 @@ async function postJSON(url, body, timeoutMs = 30000) {
   }
 }
 
-async function safeText(res) {
-  try {
-    return await res.text();
-  } catch {
-    return "";
-  }
-}
-
 function readPropEmail(props, key) {
   if (!props || !key || !props[key]) return "";
 
@@ -1422,19 +1418,6 @@ function helpText() {
     "• 顯示全部 主題 基礎理論",
     "• 直接輸入教材問題或症狀關鍵字（例：半脫位、PD怎麼判斷、C1、手麻、為什麼不打痛點）"
   ].join("\n");
-}
-
-function fmtDate(iso) {
-  try {
-    const d = new Date(iso);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  } catch {
-    return iso;
-  }
-}
-
-function shortId(id) {
-  return id ? id.replace(/-/g, "").slice(0, 8) : "";
 }
 
 async function createCandidateFromRecord(recordId, recordData) {
