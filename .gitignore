@@ -1,5 +1,11 @@
 .env
-node_modules
+node_modules/
 .vercel
 npm-debug.log
 .DS_Store
+
+# Android / Capacitor local build files
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/

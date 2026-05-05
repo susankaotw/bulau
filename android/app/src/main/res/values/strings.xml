@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">不老 AI 助理</string>
+    <string name="title_activity_main">不老 AI 助理</string>
+    <string name="package_name">com.bulau.aiassistant</string>
+    <string name="custom_url_scheme">com.bulau.aiassistant</string>
+</resources>
