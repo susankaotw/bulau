@@ -50,7 +50,8 @@ module.exports = async function handler(req, res) {
     if (req.method === "OPTIONS") {
       return res.status(200).end();
     }
-     
+
+      // ✅ 測試 API 是否活著
      if (req.method === "GET") {
       return res.status(200).json({
         ok: true,
