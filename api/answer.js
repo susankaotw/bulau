@@ -40,7 +40,18 @@ const QA_AUDIENCE = "適用對象";
 
 module.exports = async function handler(req, res) {
   try {
-    if (req.method === "GET") {
+
+     // ✅ CORS 設定（關鍵）
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    // ✅ 處理 preflight（非常重要）
+    if (req.method === "OPTIONS") {
+      return res.status(200).end();
+    }
+     
+     if (req.method === "GET") {
       return res.status(200).json({
         ok: true,
         name: "Bulau AI Answer API",
